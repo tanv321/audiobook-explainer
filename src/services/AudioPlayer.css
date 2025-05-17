@@ -1,0 +1,126 @@
+.audio-player {
+    max-width: 600px;
+    margin: 0 auto;
+    padding: 20px;
+    background-color: #f8f9fa;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  }
+  
+  .book-info {
+    text-align: center;
+    margin-bottom: 20px;
+  }
+  
+  .progress-container {
+    cursor: pointer;
+    margin-bottom: 20px;
+  }
+  
+  .progress-bar {
+    height: 6px;
+    background-color: #d1d1d1;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  
+  .progress {
+    height: 100%;
+    background-color: #007bff;
+    width: 0;
+    transition: width 0.1s linear;
+  }
+  
+  .time-display {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 5px;
+    font-size: 12px;
+    color: #666;
+  }
+  
+  .controls {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin-bottom: 20px;
+    gap: 10px;
+  }
+  
+  .control-button, .play-pause-button, .explain-button {
+    padding: 10px 15px;
+    border: none;
+    border-radius: 4px;
+    background-color: #e0e0e0;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  
+  .control-button:hover, .play-pause-button:hover, .explain-button:hover {
+    background-color: #d4d4d4;
+  }
+  
+  .play-pause-button {
+    background-color: #007bff;
+    color: white;
+    padding: 12px 24px;
+  }
+  
+  .play-pause-button:hover {
+    background-color: #0069d9;
+  }
+  
+  .play-pause-button.loading {
+    background-color: #6c757d;
+    cursor: wait;
+  }
+  
+  .explain-button {
+    background-color: #28a745;
+    color: white;
+  }
+  
+  .explain-button:hover {
+    background-color: #218838;
+  }
+  
+  .explain-button:disabled, .play-pause-button:disabled {
+    background-color: #6c757d;
+    cursor: not-allowed;
+  }
+  
+  .settings {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  .volume-control, .speed-control {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  
+  .volume-control label, .speed-control label {
+    font-size: 14px;
+    color: #333;
+  }
+  
+  .volume-control input[type="range"] {
+    width: 100px;
+  }
+  
+  @media (max-width: 480px) {
+    .controls {
+      flex-wrap: wrap;
+    }
+    
+    .settings {
+      flex-direction: column;
+      gap: 10px;
+    }
+    
+    .volume-control, .speed-control {
+      width: 100%;
+    }
+  }
