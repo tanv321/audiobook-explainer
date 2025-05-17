@@ -8,6 +8,7 @@ let mediaRecorder = null;
 let recordedChunks = [];
 let lastTenSecondsBuffer = [];
 let audioSampleRate = 44100; // Default sample rate
+let recordingStream = null; // Store the stream to recreate the media recorder
 
 /**
  * Initializes audio context and sets up audio source
@@ -40,6 +41,7 @@ export const initializeAudio = async (audioFile) => {
     
     // Set up recording stream
     const destination = audioContext.createMediaStreamDestination();
+    recordingStream = destination.stream; // Store the stream for later reuse
     
     // Connect nodes
     audioSource.connect(analyser);
@@ -47,7 +49,7 @@ export const initializeAudio = async (audioFile) => {
     audioSource.connect(destination);
     
     // Initialize media recorder for capturing audio
-    setupMediaRecorder(destination.stream);
+    setupMediaRecorder(recordingStream);
     
     // Start the audio
     audioSource.start(0);
@@ -115,6 +117,25 @@ const setupMediaRecorder = (stream) => {
 };
 
 /**
+ * Restart the media recorder after it has been stopped
+ * This is key to fixing the "Media recorder not active" error
+ */
+const restartMediaRecorder = () => {
+  console.log('[audioService.js] Restarting media recorder');
+  
+  try {
+    if (recordingStream) {
+      setupMediaRecorder(recordingStream);
+      console.log('[audioService.js] Media recorder successfully restarted');
+    } else {
+      console.warn('[audioService.js] Cannot restart media recorder: No recording stream available');
+    }
+  } catch (error) {
+    console.error('[audioService.js] Error restarting media recorder:', error);
+  }
+};
+
+/**
  * Stops recording and returns the recorded audio data
  * @returns {Promise<Object>} - The recorded audio data and mime type
  */
@@ -140,28 +161,46 @@ export const stopRecording = () => {
         const isLargeRecording = recordedChunks.length > 5; // More than 5 seconds
         console.log(`[audioService.js] Recording size: ${recordedChunks.length} chunks, large recording: ${isLargeRecording}`);
         
+        // Create a copy of recorded chunks to process
+        const chunksToProcess = [...recordedChunks];
+        
+        // Clear chunks array to prepare for next recording
+        recordedChunks = [];
+        
         // For larger files, we'll ensure compatibility by forcing MP3 or WAV format
         if (isLargeRecording) {
           console.log('[audioService.js] Large recording detected, ensuring Whisper API compatibility');
           // Convert to more reliable format for the API
-          convertToWhisperCompatibleFormat(recordedChunks, mimeType)
-            .then(result => resolve(result))
+          convertToWhisperCompatibleFormat(chunksToProcess, mimeType)
+            .then(result => {
+              // Restart media recorder for the next recording
+              restartMediaRecorder();
+              resolve(result);
+            })
             .catch(error => {
               console.error('[audioService.js] Error in conversion, falling back to regular processing:', error);
               // Fallback to regular processing
-              const audioBlob = new Blob(recordedChunks, { type: mimeType });
+              const audioBlob = new Blob(chunksToProcess, { type: mimeType });
               console.log('[audioService.js] Audio blob created with size:', audioBlob.size);
               processAudioForWhisper(audioBlob, mimeType)
-                .then(result => resolve(result))
+                .then(result => {
+                  // Restart media recorder for the next recording
+                  restartMediaRecorder();
+                  resolve(result);
+                })
                 .catch(fallbackError => reject(fallbackError));
             });
         } else {
           // For small recordings that work fine, just process normally
-          const audioBlob = new Blob(recordedChunks, { type: mimeType });
+          const audioBlob = new Blob(chunksToProcess, { type: mimeType });
           console.log('[audioService.js] Audio blob created with size:', audioBlob.size);
           
           processAudioForWhisper(audioBlob, mimeType)
-            .then(result => resolve(result))
+            .then(result => {
+              // Restart media recorder for the next recording
+              restartMediaRecorder();
+              resolve(result);
+            })
             .catch(error => reject(error));
         }
         
@@ -275,7 +314,7 @@ const audioBufferToWav = (audioBuffer) => {
     view.setUint16(32, numChannels * (bitDepth / 8), true); // Block align
     view.setUint16(34, bitDepth, true); // Bits per sample
     
-    // "data" sub-chunk
+    // "fmt " sub-chunk
     writeString(view, 36, 'data');
     view.setUint32(40, dataLength, true); // Data length
     
