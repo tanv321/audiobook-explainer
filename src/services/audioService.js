@@ -6,9 +6,11 @@ let audioSource = null;
 let audioBuffer = null;
 let mediaRecorder = null;
 let recordedChunks = [];
-let lastTenSecondsBuffer = [];
+let lastTenSecondsBuffer = [];  // Buffer to store only the last 10 seconds of audio
 let audioSampleRate = 44100; // Default sample rate
 let recordingStream = null; // Store the stream to recreate the media recorder
+const MAX_BUFFER_SIZE = 10; // Maximum number of 1-second chunks to keep (10 seconds)
+let audioStartTime = null; // Track when audio playback begins
 
 /**
  * Initializes audio context and sets up audio source
@@ -51,6 +53,9 @@ export const initializeAudio = async (audioFile) => {
     // Initialize media recorder for capturing audio
     setupMediaRecorder(recordingStream);
     
+    // Track when audio starts
+    audioStartTime = Date.now();
+    
     // Start the audio
     audioSource.start(0);
     console.log('[audioService.js] Audio playback started');
@@ -70,14 +75,11 @@ const setupMediaRecorder = (stream) => {
   console.log('[audioService.js] Setting up media recorder');
   
   try {
-    // Prioritize MP3 format if supported, which works better with Whisper API
+    // Use a more limited set of MIME types that are most reliable
     const mimeTypes = [
-      'audio/mp3', 
-      'audio/mpeg',
-      'audio/wav', 
-      'audio/ogg',
       'audio/webm',
-      'audio/webm;codecs=opus'
+      'audio/webm;codecs=opus',
+      'audio/ogg;codecs=opus'
     ];
     
     let selectedMimeType = '';
@@ -91,19 +93,34 @@ const setupMediaRecorder = (stream) => {
       }
     }
     
-    const options = selectedMimeType ? { mimeType: selectedMimeType, audioBitsPerSecond: 128000 } : {};
-    console.log(`[audioService.js] Using recording format: ${selectedMimeType || 'browser default'} with bitrate: 128kbps`);
+    const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
+    console.log(`[audioService.js] Using recording format: ${selectedMimeType || 'browser default'}`);
     
     mediaRecorder = new MediaRecorder(stream, options);
     
     // Clear previous recorded chunks
     recordedChunks = [];
+    lastTenSecondsBuffer = [];
     
     // Handle data available event
     mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
+        // Store all chunks for complete recording
         recordedChunks.push(event.data);
-        console.log('[audioService.js] Recorded chunk added, total chunks:', recordedChunks.length);
+        
+        // Add new chunk to the lastTenSecondsBuffer
+        lastTenSecondsBuffer.push({
+          timestamp: Date.now(),
+          data: event.data
+        });
+        
+        // Keep only the last MAX_BUFFER_SIZE chunks (10 seconds)
+        if (lastTenSecondsBuffer.length > MAX_BUFFER_SIZE) {
+          // Remove the oldest chunk
+          lastTenSecondsBuffer.shift();
+        }
+        
+        console.log('[audioService.js] Recorded chunk added, buffer size:', lastTenSecondsBuffer.length);
       }
     };
     
@@ -150,62 +167,41 @@ export const stopRecording = () => {
         return;
       }
       
-      const handleStop = () => {
-        console.log('[audioService.js] Media recorder stopped, combining chunks');
+      const handleStop = async () => {
+        console.log('[audioService.js] Media recorder stopped, processing chunks');
         
         // Get the MIME type from the recorder
         const mimeType = mediaRecorder.mimeType;
         console.log('[audioService.js] Recording MIME type:', mimeType);
         
-        // Check if we need to handle large files differently
-        const isLargeRecording = recordedChunks.length > 5; // More than 5 seconds
-        console.log(`[audioService.js] Recording size: ${recordedChunks.length} chunks, large recording: ${isLargeRecording}`);
+        // Extract only the data from our buffer
+        const processedChunks = lastTenSecondsBuffer.map(item => item.data);
+        console.log(`[audioService.js] Processing last ${processedChunks.length} chunks (${processedChunks.length} seconds)`);
         
-        // Create a copy of recorded chunks to process
-        const chunksToProcess = [...recordedChunks];
-        
-        // Clear chunks array to prepare for next recording
-        recordedChunks = [];
-        
-        // For larger files, we'll ensure compatibility by forcing MP3 or WAV format
-        if (isLargeRecording) {
-          console.log('[audioService.js] Large recording detected, ensuring Whisper API compatibility');
-          // Convert to more reliable format for the API
-          convertToWhisperCompatibleFormat(chunksToProcess, mimeType)
-            .then(result => {
-              // Restart media recorder for the next recording
-              restartMediaRecorder();
-              resolve(result);
-            })
-            .catch(error => {
-              console.error('[audioService.js] Error in conversion, falling back to regular processing:', error);
-              // Fallback to regular processing
-              const audioBlob = new Blob(chunksToProcess, { type: mimeType });
-              console.log('[audioService.js] Audio blob created with size:', audioBlob.size);
-              processAudioForWhisper(audioBlob, mimeType)
-                .then(result => {
-                  // Restart media recorder for the next recording
-                  restartMediaRecorder();
-                  resolve(result);
-                })
-                .catch(fallbackError => reject(fallbackError));
-            });
-        } else {
-          // For small recordings that work fine, just process normally
-          const audioBlob = new Blob(chunksToProcess, { type: mimeType });
-          console.log('[audioService.js] Audio blob created with size:', audioBlob.size);
-          
-          processAudioForWhisper(audioBlob, mimeType)
-            .then(result => {
-              // Restart media recorder for the next recording
-              restartMediaRecorder();
-              resolve(result);
-            })
-            .catch(error => reject(error));
+        if (processedChunks.length === 0) {
+          console.warn('[audioService.js] No audio chunks to process');
+          reject(new Error('No audio chunks recorded'));
+          return;
         }
         
-        // Clean up event listener
-        mediaRecorder.removeEventListener('stop', handleStop);
+        try {
+          // Create a proper audio file with the correct headers by re-recording the buffer
+          const properAudioBlob = await createProperAudioFile(processedChunks, mimeType);
+          const resultMimeType = properAudioBlob.type || mimeType;
+          
+          // Return properly formatted audio
+          resolve({
+            audioBlob: properAudioBlob,
+            mimeType: resultMimeType,
+            filename: `audio.${getFileExtensionFromMimeType(resultMimeType)}`
+          });
+        } catch (error) {
+          console.error('[audioService.js] Error creating proper audio file:', error);
+          reject(error);
+        }
+        
+        // Restart media recorder for the next recording
+        restartMediaRecorder();
       };
       
       // Add stop event handler
@@ -222,124 +218,177 @@ export const stopRecording = () => {
 };
 
 /**
- * Convert audio to a format that's definitely compatible with Whisper API
- * This function handles larger recordings that may cause format compatibility issues
- * @param {Array<Blob>} chunks - The recorded audio chunks
- * @param {string} originalMimeType - The original MIME type
- * @returns {Promise<Object>} - Object containing the converted audio and metadata
+ * Creates a proper audio file by ensuring it has correct headers
+ * @param {Array<Blob>} chunks - Audio chunks to combine
+ * @param {string} mimeType - The MIME type of the audio
+ * @returns {Promise<Blob>} - A properly formatted audio blob
  */
-const convertToWhisperCompatibleFormat = async (chunks, originalMimeType) => {
-  console.log('[audioService.js] Converting large recording to Whisper-compatible format');
+const createProperAudioFile = async (chunks, mimeType) => {
+  console.log('[audioService.js] Creating proper audio file from chunks');
   
-  return new Promise(async (resolve, reject) => {
+  // For audio/webm formats, we need a special approach
+  if (mimeType.includes('webm')) {
     try {
-      // Create an AudioContext for processing
-      const context = new (window.AudioContext || window.webkitAudioContext)();
+      // Using a more reliable approach for WebM format
+      console.log('[audioService.js] Using specialized WebM handling');
       
-      // Combine chunks into a single blob
-      const originalBlob = new Blob(chunks, { type: originalMimeType });
-      console.log(`[audioService.js] Original combined blob size: ${originalBlob.size} bytes`);
+      // Get the first chunk from the entire recording to ensure we have headers
+      const firstChunk = recordedChunks.length > 0 ? recordedChunks[0] : null;
       
-      // Convert to ArrayBuffer
-      const arrayBuffer = await originalBlob.arrayBuffer();
-      
-      // Decode the audio data
-      context.decodeAudioData(arrayBuffer, async (audioBuffer) => {
-        try {
-          console.log('[audioService.js] Successfully decoded audio, converting to WAV format');
-          
-          // Convert to WAV format
-          const wavBlob = await audioBufferToWav(audioBuffer);
-          console.log(`[audioService.js] Converted WAV blob size: ${wavBlob.size} bytes`);
-          
-          // Return WAV format which is highly compatible with Whisper API
-          resolve({
-            audioBlob: wavBlob,
-            mimeType: 'audio/wav',
-            filename: 'audio.wav'
-          });
-        } catch (conversionError) {
-          console.error('[audioService.js] Error converting to WAV:', conversionError);
-          reject(conversionError);
+      if (firstChunk) {
+        // If we have the original first chunk (which contains headers), use it
+        const properChunks = [firstChunk];
+        
+        // Then add our last 10 second chunks, avoiding duplicating the first chunk
+        for (const chunk of chunks) {
+          // Only add chunks that aren't the first chunk (to avoid duplication)
+          if (chunk !== firstChunk) {
+            properChunks.push(chunk);
+          }
         }
-      }, (decodeError) => {
-        console.error('[audioService.js] Error decoding audio data:', decodeError);
-        reject(decodeError);
-      });
-    } catch (error) {
-      console.error('[audioService.js] Error in audio conversion process:', error);
-      reject(error);
-    }
-  });
-};
-
-/**
- * Convert AudioBuffer to WAV Blob (16-bit PCM format)
- * @param {AudioBuffer} audioBuffer - The decoded audio buffer
- * @returns {Promise<Blob>} - The WAV blob
- */
-const audioBufferToWav = (audioBuffer) => {
-  return new Promise((resolve) => {
-    const numChannels = audioBuffer.numberOfChannels;
-    const sampleRate = audioBuffer.sampleRate;
-    const format = 1; // PCM format
-    const bitDepth = 16; // 16-bit PCM
-    
-    console.log(`[audioService.js] Creating WAV with ${numChannels} channels at ${sampleRate}Hz, ${bitDepth}-bit`);
-    
-    // Extract channel data
-    const channelData = [];
-    for (let channel = 0; channel < numChannels; channel++) {
-      channelData.push(audioBuffer.getChannelData(channel));
-    }
-    
-    // Calculate file size
-    const dataLength = channelData[0].length * numChannels * (bitDepth / 8);
-    const buffer = new ArrayBuffer(44 + dataLength); // 44 bytes for WAV header
-    const view = new DataView(buffer);
-    
-    // Write WAV header
-    // "RIFF" chunk descriptor
-    writeString(view, 0, 'RIFF');
-    view.setUint32(4, 36 + dataLength, true); // File size minus RIFF chunk
-    writeString(view, 8, 'WAVE');
-    
-    // "fmt " sub-chunk
-    writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true); // Length of format data
-    view.setUint16(20, format, true); // Format type (PCM)
-    view.setUint16(22, numChannels, true); // Number of channels
-    view.setUint32(24, sampleRate, true); // Sample rate
-    view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true); // Byte rate
-    view.setUint16(32, numChannels * (bitDepth / 8), true); // Block align
-    view.setUint16(34, bitDepth, true); // Bits per sample
-    
-    // "fmt " sub-chunk
-    writeString(view, 36, 'data');
-    view.setUint32(40, dataLength, true); // Data length
-    
-    // Write audio data
-    let offset = 44;
-    if (bitDepth === 16) {
-      for (let i = 0; i < channelData[0].length; i++) {
-        for (let channel = 0; channel < numChannels; channel++) {
-          const sample = Math.max(-1, Math.min(1, channelData[channel][i]));
-          view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
-          offset += 2;
-        }
+        
+        console.log(`[audioService.js] Created proper WebM with ${properChunks.length} chunks (including header chunk)`);
+        return new Blob(properChunks, { type: mimeType });
       }
+    } catch (error) {
+      console.error('[audioService.js] Error in WebM specialized handling:', error);
     }
+  }
+  
+  // If we're here, either it's not WebM or the WebM approach failed
+  // Try different approach: Convert to WAV format which is more reliable
+  try {
+    console.log('[audioService.js] Converting to WAV format for better compatibility');
     
-    console.log('[audioService.js] WAV file created successfully');
-    resolve(new Blob([buffer], { type: 'audio/wav' }));
-  });
+    // Use more reliable WAV encoding for Whisper API
+    const wavBlob = await convertToWav(chunks);
+    if (wavBlob) {
+      console.log('[audioService.js] Successfully converted to WAV format');
+      return wavBlob;
+    }
+  } catch (error) {
+    console.error('[audioService.js] Error converting to WAV:', error);
+  }
+  
+  // Fallback: just return the simple blob and hope for the best
+  console.log('[audioService.js] Using simple concatenation as fallback');
+  return new Blob(chunks, { type: mimeType });
 };
 
 /**
- * Utility to write string to DataView
- * @param {DataView} view - The DataView to write to
- * @param {number} offset - The offset to write at
- * @param {string} string - The string to write
+ * Converts audio chunks to WAV format
+ * @param {Array<Blob>} chunks - Audio chunks to convert
+ * @returns {Promise<Blob>} - A WAV format blob
+ */
+const convertToWav = async (chunks) => {
+  // For simplicity, we'll use a fixed WAV format that's compatible with Whisper API
+  // 16000Hz, 16-bit, mono
+  const sampleRate = 16000;
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  
+  try {
+    // Combine the chunks into one blob
+    const blob = new Blob(chunks);
+    const arrayBuffer = await blob.arrayBuffer();
+    
+    // Create a temporary audio context
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    
+    // Try to decode the audio data
+    let audioBuffer;
+    try {
+      audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    } catch (error) {
+      console.error('[audioService.js] Failed to decode audio for WAV conversion:', error);
+      return null; // Return null to trigger fallback
+    }
+    
+    // Get the raw PCM data
+    const numSamples = Math.ceil(audioBuffer.duration * sampleRate);
+    const outputBuffer = new Float32Array(numSamples);
+    
+    // Mix down to mono if needed and resample
+    const sourceData = audioBuffer.getChannelData(0);
+    const targetLength = outputBuffer.length;
+    const sourceLength = sourceData.length;
+    
+    // Simple resampling (this is not high quality but works for speech)
+    for (let i = 0; i < targetLength; i++) {
+      const sourceIndex = Math.floor(i * sourceLength / targetLength);
+      outputBuffer[i] = sourceData[sourceIndex];
+    }
+    
+    // Create WAV header and data
+    const wavBuffer = createWavHeader(numSamples, sampleRate, numChannels, bitsPerSample);
+    const wavData = new DataView(wavBuffer);
+    
+    // Convert float audio data to 16-bit PCM
+    let offset = 44; // WAV header size
+    for (let i = 0; i < numSamples; i++) {
+      // Convert float to 16-bit PCM
+      const sample = Math.max(-1, Math.min(1, outputBuffer[i]));
+      const pcmValue = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      wavData.setInt16(offset, pcmValue, true); // true = little endian
+      offset += 2;
+    }
+    
+    // Create WAV blob
+    return new Blob([wavBuffer], { type: 'audio/wav' });
+  } catch (error) {
+    console.error('[audioService.js] Error in WAV conversion:', error);
+    return null;
+  }
+};
+
+/**
+ * Creates a WAV header
+ * @param {number} numSamples - Number of audio samples
+ * @param {number} sampleRate - Sample rate in Hz
+ * @param {number} numChannels - Number of audio channels
+ * @param {number} bitsPerSample - Bits per sample
+ * @returns {ArrayBuffer} - WAV header buffer
+ */
+const createWavHeader = (numSamples, sampleRate, numChannels, bitsPerSample) => {
+  const dataSize = numSamples * numChannels * bitsPerSample / 8;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  
+  // RIFF identifier
+  writeString(view, 0, 'RIFF');
+  // RIFF chunk size
+  view.setUint32(4, 36 + dataSize, true);
+  // RIFF type
+  writeString(view, 8, 'WAVE');
+  // Format chunk identifier
+  writeString(view, 12, 'fmt ');
+  // Format chunk size
+  view.setUint32(16, 16, true);
+  // Sample format (raw)
+  view.setUint16(20, 1, true);
+  // Channel count
+  view.setUint16(22, numChannels, true);
+  // Sample rate
+  view.setUint32(24, sampleRate, true);
+  // Byte rate (sample rate * block align)
+  view.setUint32(28, sampleRate * numChannels * bitsPerSample / 8, true);
+  // Block align (channel count * bytes per sample)
+  view.setUint16(32, numChannels * bitsPerSample / 8, true);
+  // Bits per sample
+  view.setUint16(34, bitsPerSample, true);
+  // Data chunk identifier
+  writeString(view, 36, 'data');
+  // Data chunk size
+  view.setUint32(40, dataSize, true);
+  
+  return buffer;
+};
+
+/**
+ * Writes a string to a DataView
+ * @param {DataView} view - DataView to write to
+ * @param {number} offset - Offset to write at
+ * @param {string} string - String to write
  */
 const writeString = (view, offset, string) => {
   for (let i = 0; i < string.length; i++) {
@@ -348,65 +397,16 @@ const writeString = (view, offset, string) => {
 };
 
 /**
- * Process audio for Whisper API compatibility
- * @param {Blob} audioBlob - The recorded audio blob
- * @param {string} mimeType - The MIME type of the recorded audio
- * @returns {Promise<Object>} - Object containing the audio blob and metadata
+ * Get file extension from MIME type
+ * @param {string} mimeType - The MIME type
+ * @returns {string} - The file extension
  */
-const processAudioForWhisper = async (audioBlob, mimeType) => {
-  console.log('[audioService.js] Processing audio for Whisper API');
-  
-  // List of formats supported by Whisper API
-  const supportedFormats = ['flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'oga', 'ogg', 'wav', 'webm'];
-  
-  // Extract format and codec information
-  let format = '';
-  let codec = '';
-  
-  // Parse MIME type to extract format and codec
-  const mimeTypeParts = mimeType.split(';');
-  if (mimeTypeParts.length > 0) {
-    format = mimeTypeParts[0].split('/')[1].toLowerCase();
-    
-    // Check for codec information
-    if (mimeTypeParts.length > 1 && mimeTypeParts[1].includes('codecs=')) {
-      codec = mimeTypeParts[1].trim().split('=')[1].replace(/"/g, '');
-      console.log(`[audioService.js] Detected codec: ${codec}`);
-    }
-  }
-  
-  // Choose appropriate file extension for the API
-  let fileExtension = '';
-  
-  // For WebM formats, which can be problematic, use 'mp3' extension
-  // This is a common problem with WebM files and Whisper API
-  if (format === 'webm') {
-    console.log('[audioService.js] WebM format detected, using mp3 extension for better compatibility');
-    fileExtension = 'mp3';
-  } 
-  // Check if the extracted format is in the supported list
-  else if (supportedFormats.includes(format)) {
-    fileExtension = format;
-  } else {
-    // Default to a common supported format if format is not recognized
-    fileExtension = 'mp3';
-  }
-  
-  console.log(`[audioService.js] Using file extension: ${fileExtension} for Whisper API`);
-  
-  // Create a clean MIME type without codec information for the API
-  const cleanMimeType = `audio/${fileExtension}`;
-  
-  // Create a new blob with the clean MIME type
-  const processedBlob = new Blob([audioBlob], { type: cleanMimeType });
-  
-  console.log(`[audioService.js] Processed audio blob: size=${processedBlob.size}, type=${cleanMimeType}`);
-  
-  return {
-    audioBlob: processedBlob,
-    mimeType: cleanMimeType,
-    filename: `audio.${fileExtension}`
-  };
+const getFileExtensionFromMimeType = (mimeType) => {
+  if (mimeType.includes('webm')) return 'webm';
+  if (mimeType.includes('ogg')) return 'ogg';
+  if (mimeType.includes('mp3') || mimeType.includes('mpeg')) return 'mp3';
+  if (mimeType.includes('wav')) return 'wav';
+  return 'webm'; // Default fallback
 };
 
 /**
