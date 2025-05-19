@@ -11,6 +11,38 @@ let audioSampleRate = 44100; // Default sample rate
 let recordingStream = null; // Store the stream to recreate the media recorder
 const MAX_BUFFER_SIZE = 10; // Maximum number of 1-second chunks to keep (10 seconds)
 let audioStartTime = null; // Track when audio playback begins
+let isRecordingActive = false; // Track if recording is currently active
+let isResetting = false; // Flag to prevent operations during reset
+
+/**
+ * Partial reset - only resets recording components but keeps the audio context
+ * This is safer than a complete reset
+ */
+const resetRecordingState = () => {
+  console.log('[audioService.js] Resetting recording state (partial reset)');
+  
+  try {
+    // Stop media recorder if active
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      try {
+        mediaRecorder.stop();
+      } catch (e) {
+        console.log('[audioService.js] Error stopping media recorder during reset:', e);
+      }
+    }
+    
+    // Clear all buffers
+    recordedChunks = [];
+    lastTenSecondsBuffer = [];
+    
+    // Reset flags
+    isRecordingActive = false;
+    
+    console.log('[audioService.js] Recording state successfully reset');
+  } catch (error) {
+    console.error('[audioService.js] Error during recording state reset:', error);
+  }
+};
 
 /**
  * Initializes audio context and sets up audio source
@@ -20,12 +52,18 @@ let audioStartTime = null; // Track when audio playback begins
 export const initializeAudio = async (audioFile) => {
   console.log('[audioService.js] Initializing audio');
   
+  // First, reset recording state
+  resetRecordingState();
+  
   try {
     // Create new audio context if not exists or is closed
     if (!audioContext || audioContext.state === 'closed') {
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
       console.log('[audioService.js] Created new audio context with state:', audioContext.state);
       audioSampleRate = audioContext.sampleRate;
+    } else if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+      console.log('[audioService.js] Resumed existing audio context');
     }
     
     // Read the audio file and set up the source
@@ -51,7 +89,7 @@ export const initializeAudio = async (audioFile) => {
     audioSource.connect(destination);
     
     // Initialize media recorder for capturing audio
-    setupMediaRecorder(recordingStream);
+    await setupMediaRecorder(recordingStream);
     
     // Track when audio starts
     audioStartTime = Date.now();
@@ -71,10 +109,19 @@ export const initializeAudio = async (audioFile) => {
  * Sets up the media recorder to capture audio
  * @param {MediaStream} stream - The audio stream
  */
-const setupMediaRecorder = (stream) => {
+const setupMediaRecorder = async (stream) => {
   console.log('[audioService.js] Setting up media recorder');
   
   try {
+    // Make sure any existing media recorder is stopped
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      try {
+        mediaRecorder.stop();
+      } catch (e) {
+        console.log('[audioService.js] Error stopping existing media recorder:', e);
+      }
+    }
+    
     // Use a more limited set of MIME types that are most reliable
     const mimeTypes = [
       'audio/webm',
@@ -96,11 +143,8 @@ const setupMediaRecorder = (stream) => {
     const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
     console.log(`[audioService.js] Using recording format: ${selectedMimeType || 'browser default'}`);
     
+    // Create new media recorder
     mediaRecorder = new MediaRecorder(stream, options);
-    
-    // Clear previous recorded chunks
-    recordedChunks = [];
-    lastTenSecondsBuffer = [];
     
     // Handle data available event
     mediaRecorder.ondataavailable = (event) => {
@@ -124,31 +168,22 @@ const setupMediaRecorder = (stream) => {
       }
     };
     
+    // Add error handler
+    mediaRecorder.onerror = (error) => {
+      console.error('[audioService.js] Media recorder error:', error);
+    };
+    
+    // Set the flag that recording is active
+    isRecordingActive = true;
+    
     // Start recording with smaller chunks to avoid format issues with larger files
     mediaRecorder.start(1000); // Collect data in 1-second chunks
     console.log('[audioService.js] Media recorder started with MIME type:', mediaRecorder.mimeType);
+    
+    return mediaRecorder;
   } catch (error) {
     console.error('[audioService.js] Error setting up media recorder:', error);
     throw error;
-  }
-};
-
-/**
- * Restart the media recorder after it has been stopped
- * This is key to fixing the "Media recorder not active" error
- */
-const restartMediaRecorder = () => {
-  console.log('[audioService.js] Restarting media recorder');
-  
-  try {
-    if (recordingStream) {
-      setupMediaRecorder(recordingStream);
-      console.log('[audioService.js] Media recorder successfully restarted');
-    } else {
-      console.warn('[audioService.js] Cannot restart media recorder: No recording stream available');
-    }
-  } catch (error) {
-    console.error('[audioService.js] Error restarting media recorder:', error);
   }
 };
 
@@ -161,69 +196,136 @@ export const stopRecording = () => {
   
   return new Promise((resolve, reject) => {
     try {
-      if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      if (!mediaRecorder || mediaRecorder.state === 'inactive' || !isRecordingActive) {
         console.warn('[audioService.js] Media recorder not active');
         reject(new Error('Media recorder not active'));
         return;
       }
       
-      const handleStop = async () => {
-        console.log('[audioService.js] Media recorder stopped, processing chunks');
-        
-        // Get the MIME type from the recorder
-        const mimeType = mediaRecorder.mimeType;
-        console.log('[audioService.js] Recording MIME type:', mimeType);
+      // Set a flag to prevent multiple operations
+      if (isResetting) {
+        console.warn('[audioService.js] Reset operation in progress, cannot stop recording now');
+        reject(new Error('Reset operation in progress'));
+        return;
+      }
+      
+      isResetting = true;
+      
+      // Make a copy of the buffers BEFORE we stop recording
+      // This prevents race conditions where buffer might change during processing
+      const bufferCopy = [...lastTenSecondsBuffer];
+      const chunksCopy = [...recordedChunks];
+      
+      // Set recording flag to false
+      isRecordingActive = false;
+      
+      // Setup a timeout in case the stop event doesn't fire
+      const stopTimeout = setTimeout(() => {
+        console.warn('[audioService.js] Media recorder stop event timed out, proceeding anyway');
+        processAudio(bufferCopy, chunksCopy, mediaRecorder.mimeType)
+          .then(resolve)
+          .catch(reject)
+          .finally(() => {
+            isResetting = false;
+          });
+      }, 2000);
+      
+      // Function to process the audio after stopping
+      const processAudio = async (buffer, chunks, mimeType) => {
+        console.log('[audioService.js] Processing audio after stop');
         
         // Extract only the data from our buffer
-        const processedChunks = lastTenSecondsBuffer.map(item => item.data);
+        const processedChunks = buffer.map(item => item.data);
         console.log(`[audioService.js] Processing last ${processedChunks.length} chunks (${processedChunks.length} seconds)`);
         
         if (processedChunks.length === 0) {
           console.warn('[audioService.js] No audio chunks to process');
-          reject(new Error('No audio chunks recorded'));
-          return;
+          return Promise.reject(new Error('No audio chunks recorded'));
         }
         
         try {
-          // Create a proper audio file with the correct headers by re-recording the buffer
-          const properAudioBlob = await createProperAudioFile(processedChunks, mimeType);
+          // Create a proper audio file with the correct headers
+          const properAudioBlob = await createProperAudioFile(processedChunks, chunks, mimeType);
           const resultMimeType = properAudioBlob.type || mimeType;
           
-          // Return properly formatted audio
-          resolve({
+          // Create result object
+          const result = {
             audioBlob: properAudioBlob,
             mimeType: resultMimeType,
             filename: `audio.${getFileExtensionFromMimeType(resultMimeType)}`
-          });
+          };
+          
+          // Return result first
+          return result;
         } catch (error) {
           console.error('[audioService.js] Error creating proper audio file:', error);
-          reject(error);
+          throw error;
         }
+      };
+      
+      // Setup the stop event handler
+      const handleStop = () => {
+        // Clear the timeout since the event fired
+        clearTimeout(stopTimeout);
         
-        // Restart media recorder for the next recording
-        restartMediaRecorder();
+        // Process the audio
+        processAudio(bufferCopy, chunksCopy, mediaRecorder.mimeType)
+          .then(result => {
+            resolve(result);
+            
+            // AFTER we've successfully resolved the promise, restart the recorder
+            // This prevents blocking the UI while setting up the recorder
+            setTimeout(() => {
+              try {
+                if (recordingStream) {
+                  setupMediaRecorder(recordingStream);
+                }
+              } catch (error) {
+                console.error('[audioService.js] Error restarting media recorder:', error);
+              }
+              isResetting = false;
+            }, 100);
+          })
+          .catch(error => {
+            reject(error);
+            isResetting = false;
+          });
       };
       
       // Add stop event handler
-      mediaRecorder.addEventListener('stop', handleStop);
+      mediaRecorder.addEventListener('stop', handleStop, { once: true });
       
       // Stop recording
-      mediaRecorder.stop();
-      console.log('[audioService.js] Stopping media recorder');
+      try {
+        mediaRecorder.stop();
+        console.log('[audioService.js] Media recorder stop command issued');
+      } catch (error) {
+        console.error('[audioService.js] Error stopping media recorder:', error);
+        // Still try to process what we have
+        clearTimeout(stopTimeout);
+        processAudio(bufferCopy, chunksCopy, mediaRecorder.mimeType)
+          .then(resolve)
+          .catch(reject)
+          .finally(() => {
+            isResetting = false;
+          });
+      }
     } catch (error) {
-      console.error('[audioService.js] Error stopping recording:', error);
+      console.error('[audioService.js] Error in stopRecording:', error);
       reject(error);
+      isResetting = false;
     }
   });
 };
 
 /**
  * Creates a proper audio file by ensuring it has correct headers
- * @param {Array<Blob>} chunks - Audio chunks to combine
+ * @param {Array<Blob>} chunks - Audio chunks to combine (last 10 seconds)
+ * @param {Array<Blob>} allChunks - All recorded chunks (for header extraction)
  * @param {string} mimeType - The MIME type of the audio
  * @returns {Promise<Blob>} - A properly formatted audio blob
  */
-const createProperAudioFile = async (chunks, mimeType) => {
+const createProperAudioFile = async (chunks, allChunks, mimeType) => {
   console.log('[audioService.js] Creating proper audio file from chunks');
   
   // For audio/webm formats, we need a special approach
@@ -233,7 +335,7 @@ const createProperAudioFile = async (chunks, mimeType) => {
       console.log('[audioService.js] Using specialized WebM handling');
       
       // Get the first chunk from the entire recording to ensure we have headers
-      const firstChunk = recordedChunks.length > 0 ? recordedChunks[0] : null;
+      const firstChunk = allChunks.length > 0 ? allChunks[0] : null;
       
       if (firstChunk) {
         // If we have the original first chunk (which contains headers), use it
@@ -255,7 +357,6 @@ const createProperAudioFile = async (chunks, mimeType) => {
     }
   }
   
-  // If we're here, either it's not WebM or the WebM approach failed
   // Try different approach: Convert to WAV format which is more reliable
   try {
     console.log('[audioService.js] Converting to WAV format for better compatibility');
@@ -293,14 +394,15 @@ const convertToWav = async (chunks) => {
     const arrayBuffer = await blob.arrayBuffer();
     
     // Create a temporary audio context
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const tempContext = new (window.AudioContext || window.webkitAudioContext)();
     
     // Try to decode the audio data
     let audioBuffer;
     try {
-      audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      audioBuffer = await tempContext.decodeAudioData(arrayBuffer);
     } catch (error) {
       console.error('[audioService.js] Failed to decode audio for WAV conversion:', error);
+      tempContext.close(); // Clean up context
       return null; // Return null to trigger fallback
     }
     
@@ -332,6 +434,9 @@ const convertToWav = async (chunks) => {
       wavData.setInt16(offset, pcmValue, true); // true = little endian
       offset += 2;
     }
+    
+    // Clean up temp context
+    tempContext.close();
     
     // Create WAV blob
     return new Blob([wavBuffer], { type: 'audio/wav' });
