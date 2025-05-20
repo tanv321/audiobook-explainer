@@ -4,6 +4,7 @@ import ExplanationDisplay from './components/ExplanationDisplay';
 import AudioUploader from './components/AudioUploader';
 import { initializeAudio, stopRecording } from './services/audioService';
 import { processAudioAndGetExplanation } from './services/apiService';
+import './App.css';
 
 function App() {
   console.log('[App.js] Initializing App component');
@@ -15,6 +16,7 @@ function App() {
   const [isExplaining, setIsExplaining] = useState(false);
   const [audioContext, setAudioContext] = useState(null);
   const [audioSource, setAudioSource] = useState(null);
+  const [minExplanationTime, setMinExplanationTime] = useState(null);
 
   // Effect to clean up audio context on unmount
   useEffect(() => {
@@ -40,9 +42,12 @@ function App() {
     setExplanation('');
     setIsPlaying(false);
     setIsExplaining(false);
+    setMinExplanationTime(null);
     
     if (audioContext && audioContext.state !== 'closed') {
       audioContext.close();
+      setAudioContext(null);
+      setAudioSource(null);
     }
   };
 
@@ -61,6 +66,8 @@ function App() {
         setAudioContext(context);
         setAudioSource(source);
         console.log('[App.js] Audio context and source initialized');
+      } else if (audioContext.state === 'suspended') {
+        audioContext.resume();
       }
       
       setIsPlaying(true);
@@ -71,7 +78,7 @@ function App() {
 
   const handlePause = () => {
     console.log('[App.js] Pausing audio playback');
-    if (audioContext) {
+    if (audioContext && audioContext.state === 'running') {
       audioContext.suspend();
       setIsPlaying(false);
     }
@@ -89,16 +96,22 @@ function App() {
       }
       
       // Pause the audio while generating explanation
-      audioContext.suspend();
-      setIsPlaying(false);
+      if (audioContext.state === 'running') {
+        audioContext.suspend();
+        setIsPlaying(false);
+      }
       
-      // Get last 10 seconds of audio for explanation
+      // Get audio data for explanation
       const recordedAudioData = await stopRecording();
       console.log('[App.js] Audio data captured for explanation');
       
       // Process the audio data and get explanation from API
       const response = await processAudioAndGetExplanation(recordedAudioData, fileName);
       console.log('[App.js] Received explanation response');
+      
+      // Set a minimum time for the explanation to be displayed
+      // This ensures short explanations don't disappear too quickly
+      setMinExplanationTime(Date.now() + 10000); // 10 seconds minimum display time
       
       setExplanation(response.explanation);
     } catch (error) {
@@ -113,6 +126,46 @@ function App() {
     if (audioContext && audioContext.state === 'suspended') {
       audioContext.resume();
       setIsPlaying(true);
+    }
+  };
+  
+  // Handler for when text-to-speech finishes
+  const handleSpeechEnd = () => {
+    console.log('[App.js] Speech ended, checking if we can auto-resume audiobook');
+    
+    // Check if minimum explanation time has passed
+    const canResume = !minExplanationTime || Date.now() >= minExplanationTime;
+    
+    if (canResume) {
+      console.log('[App.js] Minimum explanation time passed, auto-resuming audiobook');
+      // Add a small delay before resuming to ensure full speech completion
+      setTimeout(() => {
+        // Auto-resume the audiobook only if it's not already playing
+        if (audioContext && audioContext.state === 'suspended') {
+          handleResume();
+          
+          // Clear the explanation after a delay to ensure smooth transition
+          setTimeout(() => {
+            setExplanation('');
+            setMinExplanationTime(null);
+          }, 1000);
+        }
+      }, 500);
+    } else {
+      console.log('[App.js] Minimum explanation time not yet passed, waiting...');
+      // Wait until minimum time has passed, then auto-resume
+      const remainingTime = minExplanationTime - Date.now();
+      setTimeout(() => {
+        if (audioContext && audioContext.state === 'suspended') {
+          handleResume();
+          
+          // Clear the explanation after a delay
+          setTimeout(() => {
+            setExplanation('');
+            setMinExplanationTime(null);
+          }, 1000);
+        }
+      }, remainingTime + 500);
     }
   };
 
@@ -135,7 +188,10 @@ function App() {
       )}
       
       {explanation && (
-        <ExplanationDisplay explanation={explanation} />
+        <ExplanationDisplay 
+          explanation={explanation} 
+          onSpeechEnd={handleSpeechEnd}
+        />
       )}
     </div>
   );

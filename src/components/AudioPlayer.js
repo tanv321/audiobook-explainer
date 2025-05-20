@@ -1,4 +1,3 @@
-
 import React from 'react';
 
 function AudioPlayer({ 
@@ -40,16 +39,20 @@ function AudioPlayer({
           {isExplaining ? 'Explaining...' : 'Explain Last 10 Seconds'}
         </button>
         
+        {/* Keep the Resume button for manual control if needed */}
         <button 
           onClick={onResume}
           disabled={isPlaying || !fileName || isExplaining}
+          style={{ opacity: 0.7 }} // Make it less prominent since auto-resume is available
         >
-          Resume
+          Resume Manually
         </button>
       </div>
       
       <p className="instructions">
         Press "Explain" to have the AI explain what's happening in the audiobook.
+        <br/>
+        <small>The audiobook will automatically resume after the explanation is read aloud.</small>
       </p>
     </div>
   );
