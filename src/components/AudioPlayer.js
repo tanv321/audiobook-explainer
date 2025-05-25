@@ -28,6 +28,69 @@ function AudioPlayer({
     }
   }, [propCurrentTime]);
 
+  // Setup Media Session API for car controls
+  useEffect(() => {
+    if ('mediaSession' in navigator) {
+      // Set metadata
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: fileName || 'Audiobook',
+        artist: 'AI Explained Audiobook',
+        album: 'Audiobook Collection',
+      });
+
+      // Set up action handlers
+      navigator.mediaSession.setActionHandler('play', () => {
+        if (!isExplaining) {
+          onPlay();
+        }
+      });
+
+      navigator.mediaSession.setActionHandler('pause', () => {
+        if (!isExplaining) {
+          onPause();
+        }
+      });
+
+      // Map the previoustrack action to explain functionality
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        console.log('[AudioPlayer] Car back button pressed - triggering explain');
+        if (!isExplaining && (isPlaying || fileName)) {
+          onExplain();
+        }
+      });
+
+      // Optional: You could also map seekbackward to explain
+      navigator.mediaSession.setActionHandler('seekbackward', (event) => {
+        console.log('[AudioPlayer] Car seek backward pressed - triggering explain');
+        if (!isExplaining && (isPlaying || fileName)) {
+          onExplain();
+        }
+      });
+
+      // Update playback state
+      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+
+      // Update position state if we have duration
+      if (duration > 0) {
+        navigator.mediaSession.setPositionState({
+          duration: duration,
+          playbackRate: 1,
+          position: currentTime
+        });
+      }
+    }
+
+    // Cleanup functionaa
+    return () => {
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.setActionHandler('play', null);
+        navigator.mediaSession.setActionHandler('pause', null);
+        navigator.mediaSession.setActionHandler('previoustrack', null);
+        navigator.mediaSession.setActionHandler('seekbackward', null);
+      }
+    };
+  }, [isPlaying, isExplaining, fileName, onPlay, onPause, onExplain, duration, currentTime]);
+
   // Calculate and update current time
   const updateCurrentTime = () => {
     if (isPlaying && playbackStartTime.current !== null) {
@@ -239,6 +302,8 @@ function AudioPlayer({
         Press "Explain" to have the AI explain what's happening in the audiobook.
         <br/>
         <small>The audiobook will automatically resume after the explanation is read aloud.</small>
+        <br/>
+        <small><strong>Car users:</strong> Press the back/previous button on your car stereo to trigger explanations.</small>
       </p>
     </div>
   );
