@@ -9,9 +9,10 @@ let lastTenSecondsBuffer = [];  // Buffer to store only the last 10 seconds of a
 let audioSampleRate = 44100; // Default sample rate
 let recordingStream = null; // Store the stream to recreate the media recorder
 const MAX_BUFFER_SIZE = 10; // Maximum number of 1-second chunks to keep (10 seconds)
-let audioStartTime = null; // Track when audio playback begins
+let audioStartTime = null; // Track when audio playbook begins
 let isRecordingActive = false; // Track if recording is currently active
 let isResetting = false; // Flag to prevent operations during reset
+let currentPlaybackTime = 0; // Track current playback position
 
 const resetRecordingState = () => {
   try {
@@ -30,10 +31,15 @@ const resetRecordingState = () => {
   }
 };
 
-export const initializeAudio = async (audioFile) => {
+export const initializeAudio = async (audioFile, seekTime = 0) => {
   resetRecordingState();
   
   try {
+    if (audioContext && audioSource) {
+      audioSource.stop();
+      audioSource.disconnect();
+    }
+    
     if (!audioContext || audioContext.state === 'closed') {
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
       audioSampleRate = audioContext.sampleRate;
@@ -60,14 +66,27 @@ export const initializeAudio = async (audioFile) => {
     await setupMediaRecorder(recordingStream);
     
     audioStartTime = Date.now();
+    currentPlaybackTime = seekTime;
     
-    audioSource.start(0);
+    // Start from the specified time
+    audioSource.start(0, seekTime);
     
     return { context: audioContext, source: audioSource };
   } catch (error) {
     console.error('[audioService.js] Error initializing audio:', error);
     throw error;
   }
+};
+
+export const getCurrentPlaybackTime = () => {
+  if (!audioStartTime) return 0;
+  const elapsedSinceStart = (Date.now() - audioStartTime) / 1000;
+  return currentPlaybackTime + elapsedSinceStart;
+};
+
+export const setCurrentPlaybackTime = (time) => {
+  currentPlaybackTime = time;
+  audioStartTime = Date.now();
 };
 
 const setupMediaRecorder = async (stream) => {

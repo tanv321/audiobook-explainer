@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import AudioPlayer from './components/AudioPlayer';
 import ExplanationDisplay from './components/ExplanationDisplay';
 import AudioUploader from './components/AudioUploader';
-import { initializeAudio, stopRecording } from './services/audioService';
+import { initializeAudio, stopRecording, getCurrentPlaybackTime, setCurrentPlaybackTime } from './services/audioService';
 import { processAudioAndGetExplanation } from './services/apiService';
 import './App.css';
 
@@ -17,6 +17,7 @@ function App() {
   const [audioContext, setAudioContext] = useState(null);
   const [audioSource, setAudioSource] = useState(null);
   const [minExplanationTime, setMinExplanationTime] = useState(null);
+  const [pausedAtTime, setPausedAtTime] = useState(0);
 
   // Effect to clean up audio context on unmount
   useEffect(() => {
@@ -34,6 +35,14 @@ function App() {
     };
   }, [audioContext, audioSource]);
 
+  // Set up global seek handler
+  useEffect(() => {
+    window.audioPlayerSeek = handleSeek;
+    return () => {
+      delete window.audioPlayerSeek;
+    };
+  }, [audioFile, audioContext, isPlaying]);
+
   const handleFileUpload = (file) => {
     console.log('[App.js] File uploaded:', file.name);
     setAudioFile(file);
@@ -43,6 +52,7 @@ function App() {
     setIsPlaying(false);
     setIsExplaining(false);
     setMinExplanationTime(null);
+    setPausedAtTime(0);
     
     if (audioContext && audioContext.state !== 'closed') {
       audioContext.close();
@@ -51,8 +61,8 @@ function App() {
     }
   };
 
-  const handlePlay = async () => {
-    console.log('[App.js] Starting audio playback');
+  const handlePlay = async (seekTime = null) => {
+    console.log('[App.js] Starting audio playbook');
     
     try {
       if (!audioFile) {
@@ -60,15 +70,18 @@ function App() {
         return;
       }
 
-      // Initialize audio context and source if not already done
-      if (!audioContext || audioContext.state === 'closed') {
-        const { context, source } = await initializeAudio(audioFile);
-        setAudioContext(context);
-        setAudioSource(source);
-        console.log('[App.js] Audio context and source initialized');
-      } else if (audioContext.state === 'suspended') {
-        audioContext.resume();
+      // Use provided seekTime or current paused position
+      const startTime = seekTime !== null ? seekTime : pausedAtTime;
+      
+      // Clean up existing context
+      if (audioContext && audioContext.state !== 'closed') {
+        audioContext.close();
       }
+      
+      const { context, source } = await initializeAudio(audioFile, startTime);
+      setAudioContext(context);
+      setAudioSource(source);
+      console.log('[App.js] Audio context and source initialized');
       
       setIsPlaying(true);
     } catch (error) {
@@ -79,8 +92,33 @@ function App() {
   const handlePause = () => {
     console.log('[App.js] Pausing audio playback');
     if (audioContext && audioContext.state === 'running') {
+      // Store current playback position
+      const currentTime = getCurrentPlaybackTime();
+      setPausedAtTime(currentTime);
+      
       audioContext.suspend();
       setIsPlaying(false);
+    }
+  };
+
+  const handleSeek = async (time) => {
+    console.log('[App.js] Seeking to time:', time);
+    setPausedAtTime(time);
+    
+    // If currently playing, restart from new position
+    if (isPlaying) {
+      // Stop current playback
+      if (audioContext && audioContext.state !== 'closed') {
+        audioContext.close();
+      }
+      setAudioContext(null);
+      setAudioSource(null);
+      setIsPlaying(false);
+      
+      // Restart with new time
+      setTimeout(() => {
+        handlePlay(time);
+      }, 100);
     }
   };
 
@@ -95,9 +133,19 @@ function App() {
         return;
       }
       
-      // Pause the audio while generating explanation
-      if (audioContext.state === 'running') {
-        audioContext.suspend();
+      // Store current position before pausing
+      if (isPlaying) {
+        const currentTime = getCurrentPlaybackTime();
+        setPausedAtTime(currentTime);
+        
+        if (audioSource) {
+          audioSource.stop();
+          setAudioSource(null);
+        }
+        if (audioContext && audioContext.state !== 'closed') {
+          audioContext.close();
+          setAudioContext(null);
+        }
         setIsPlaying(false);
       }
       
@@ -110,7 +158,6 @@ function App() {
       console.log('[App.js] Received explanation response');
       
       // Set a minimum time for the explanation to be displayed
-      // This ensures short explanations don't disappear too quickly
       setMinExplanationTime(Date.now() + 10000); // 10 seconds minimum display time
       
       setExplanation(response.explanation);
@@ -123,9 +170,8 @@ function App() {
 
   const handleResume = () => {
     console.log('[App.js] Resuming audio playback');
-    if (audioContext && audioContext.state === 'suspended') {
-      audioContext.resume();
-      setIsPlaying(true);
+    if (!isPlaying) {
+      handlePlay(pausedAtTime);
     }
   };
   
@@ -138,13 +184,13 @@ function App() {
     
     if (canResume) {
       console.log('[App.js] Minimum explanation time passed, auto-resuming audiobook');
-      // Add a small delay before resuming to ensure full speech completion
+      // Add a small delay before resuming
       setTimeout(() => {
         // Auto-resume the audiobook only if it's not already playing
-        if (audioContext && audioContext.state === 'suspended') {
+        if (!isPlaying) {
           handleResume();
           
-          // Clear the explanation after a delay to ensure smooth transition
+          // Clear the explanation after a delay
           setTimeout(() => {
             setExplanation('');
             setMinExplanationTime(null);
@@ -156,7 +202,7 @@ function App() {
       // Wait until minimum time has passed, then auto-resume
       const remainingTime = minExplanationTime - Date.now();
       setTimeout(() => {
-        if (audioContext && audioContext.state === 'suspended') {
+        if (!isPlaying) {
           handleResume();
           
           // Clear the explanation after a delay
@@ -184,6 +230,8 @@ function App() {
           onResume={handleResume}
           fileName={fileName}
           isExplaining={isExplaining}
+          audioFile={audioFile}
+          currentTime={pausedAtTime}
         />
       )}
       
