@@ -1,9 +1,9 @@
-// Updated App.js - Only the imports and return statement change
+// Updated App.js - Fixed UI state management for Play/Pause button
 import React, { useState, useEffect } from 'react';
 import AudioPlayer from './components/AudioPlayer';
 import ExplanationDisplay from './components/ExplanationDisplay';
 import AudioUploader from './components/AudioUploader';
-import AuthWrapper from './components/AuthWrapper'; // Add this import
+import AuthWrapper from './components/AuthWrapper';
 import { initializeAudio, stopRecording, getCurrentPlaybackTime, setCurrentPlaybackTime } from './services/audioService';
 import { processAudioAndGetExplanation } from './services/apiService';
 import './App.css';
@@ -21,9 +21,10 @@ function App() {
   const [audioSource, setAudioSource] = useState(null);
   const [minExplanationTime, setMinExplanationTime] = useState(null);
   const [pausedAtTime, setPausedAtTime] = useState(0);
+  const [wasPlayingBeforeExplanation, setWasPlayingBeforeExplanation] = useState(false);
 
-  // All your existing useEffect hooks and handlers remain exactly the same
-  // ... (keeping all the existing code from your original App.js)
+  // iOS detection
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 
   // Effect to clean up audio context on unmount
   useEffect(() => {
@@ -59,6 +60,7 @@ function App() {
     setIsExplaining(false);
     setMinExplanationTime(null);
     setPausedAtTime(0);
+    setWasPlayingBeforeExplanation(false);
     
     if (audioContext && audioContext.state !== 'closed') {
       audioContext.close();
@@ -68,7 +70,7 @@ function App() {
   };
 
   const handlePlay = async (seekTime = null) => {
-    console.log('[App.js] Starting audio playbook');
+    console.log('[App.js] Starting audio playback');
     
     try {
       if (!audioFile) {
@@ -89,7 +91,14 @@ function App() {
       setAudioSource(source);
       console.log('[App.js] Audio context and source initialized');
       
+      // Clear any existing explanation when starting new playback
+      if (explanation) {
+        setExplanation('');
+        setMinExplanationTime(null);
+      }
+      
       setIsPlaying(true);
+      setWasPlayingBeforeExplanation(false); // Reset this flag
     } catch (error) {
       console.error('[App.js] Error starting playback:', error);
     }
@@ -139,10 +148,15 @@ function App() {
         return;
       }
       
-      // Store current position before pausing
+      // Remember if we were playing before explanation
+      const wasCurrentlyPlaying = isPlaying;
+      setWasPlayingBeforeExplanation(wasCurrentlyPlaying);
+      
+      // Store current position and STOP playback
       if (isPlaying) {
         const currentTime = getCurrentPlaybackTime();
         setPausedAtTime(currentTime);
+        console.log('[App.js] Stopping playback for explanation at time:', currentTime);
         
         if (audioSource) {
           audioSource.stop();
@@ -152,6 +166,8 @@ function App() {
           audioContext.close();
           setAudioContext(null);
         }
+        
+        // IMPORTANT: Set isPlaying to false immediately so UI reflects paused state
         setIsPlaying(false);
       }
       
@@ -164,11 +180,16 @@ function App() {
       console.log('[App.js] Received explanation response');
       
       // Set a minimum time for the explanation to be displayed
-      setMinExplanationTime(Date.now() + 10000); // 10 seconds minimum display time
+      const minDisplayTime = isIOS ? 12000 : 8000; // 12s for iOS, 8s for others
+      setMinExplanationTime(Date.now() + minDisplayTime);
       
       setExplanation(response.explanation);
     } catch (error) {
       console.error('[App.js] Error getting explanation:', error);
+      // If there was an error, restore play state if we were playing before
+      if (wasPlayingBeforeExplanation) {
+        setIsPlaying(true);
+      }
     } finally {
       setIsExplaining(false);
     }
@@ -183,45 +204,44 @@ function App() {
   
   // Handler for when text-to-speech finishes
   const handleSpeechEnd = () => {
-    console.log('[App.js] Speech ended, checking if we can auto-resume audiobook');
+    console.log('[App.js] Speech ended, auto-resuming audiobook. Was playing before:', wasPlayingBeforeExplanation);
     
     // Check if minimum explanation time has passed
     const canResume = !minExplanationTime || Date.now() >= minExplanationTime;
     
+    const executeResume = () => {
+      // Only auto-resume if we were playing before the explanation
+      if (wasPlayingBeforeExplanation && !isPlaying) {
+        console.log('[App.js] Auto-resuming audiobook playback');
+        handleResume();
+        
+        // Clear the explanation after resuming
+        setTimeout(() => {
+          setExplanation('');
+          setMinExplanationTime(null);
+          setWasPlayingBeforeExplanation(false);
+        }, 1000);
+      } else {
+        console.log('[App.js] Not auto-resuming - was not playing before explanation');
+        // Just clear the explanation
+        setTimeout(() => {
+          setExplanation('');
+          setMinExplanationTime(null);
+          setWasPlayingBeforeExplanation(false);
+        }, 1000);
+      }
+    };
+    
     if (canResume) {
-      console.log('[App.js] Minimum explanation time passed, auto-resuming audiobook');
-      // Add a small delay before resuming
-      setTimeout(() => {
-        // Auto-resume the audiobook only if it's not already playing
-        if (!isPlaying) {
-          handleResume();
-          
-          // Clear the explanation after a delay
-          setTimeout(() => {
-            setExplanation('');
-            setMinExplanationTime(null);
-          }, 1000);
-        }
-      }, 500);
+      console.log('[App.js] Minimum explanation time passed, proceeding with resume logic');
+      setTimeout(executeResume, 500);
     } else {
-      console.log('[App.js] Minimum explanation time not yet passed, waiting...');
-      // Wait until minimum time has passed, then auto-resume
+      console.log('[App.js] Waiting for minimum explanation time to pass');
       const remainingTime = minExplanationTime - Date.now();
-      setTimeout(() => {
-        if (!isPlaying) {
-          handleResume();
-          
-          // Clear the explanation after a delay
-          setTimeout(() => {
-            setExplanation('');
-            setMinExplanationTime(null);
-          }, 1000);
-        }
-      }, remainingTime + 500);
+      setTimeout(executeResume, remainingTime + 500);
     }
   };
 
-  // Wrap your existing JSX with AuthWrapper
   return (
     <AuthWrapper>
       <div className="app-container">
@@ -249,9 +269,29 @@ function App() {
             onSpeechEnd={handleSpeechEnd}
           />
         )}
+        
+        {/* Debug info */}
+        {process.env.NODE_ENV === 'development' && (
+          <div style={{
+            position: 'fixed',
+            bottom: isIOS ? '100px' : '80px',
+            left: '10px',
+            background: 'rgba(0,0,0,0.8)',
+            color: 'white',
+            padding: '8px',
+            borderRadius: '4px',
+            fontSize: '12px',
+            zIndex: 999
+          }}>
+            Playing: {isPlaying ? 'Yes' : 'No'} | 
+            Explaining: {isExplaining ? 'Yes' : 'No'} | 
+            Was Playing Before: {wasPlayingBeforeExplanation ? 'Yes' : 'No'} |
+            Paused At: {Math.round(pausedAtTime)}s
+          </div>
+        )}
       </div>
-      <AudioDebugger />  {/* Add this line */}
-      </AuthWrapper>
+      <AudioDebugger />
+    </AuthWrapper>
   );
 }
 
