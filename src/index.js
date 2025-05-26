@@ -13,7 +13,7 @@ root.render(
   </React.StrictMode>
 );
 
-// Register service worker for PWA functionality
+// Register service worker for PWA functionalit
 serviceWorkerRegistration.register();
 
 console.log('[index.js] Service worker registered');
