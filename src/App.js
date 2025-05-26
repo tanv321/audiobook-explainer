@@ -7,6 +7,7 @@ import AuthWrapper from './components/AuthWrapper'; // Add this import
 import { initializeAudio, stopRecording, getCurrentPlaybackTime, setCurrentPlaybackTime } from './services/audioService';
 import { processAudioAndGetExplanation } from './services/apiService';
 import './App.css';
+import AudioDebugger from './components/AudioDebugger';
 
 function App() {
   console.log('[App.js] Initializing App component');
@@ -249,7 +250,8 @@ function App() {
           />
         )}
       </div>
-    </AuthWrapper>
+      <AudioDebugger />  {/* Add this line */}
+      </AuthWrapper>
   );
 }
 

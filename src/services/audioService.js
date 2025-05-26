@@ -1,18 +1,82 @@
-// Handles audio recording, buffering, and processing
-console.log('[audioService.js] Loading audio service');
+// iOS-Compatible Audio Service - Handles audio recording, buffering, and processing
+console.log('[audioService.js] Loading iOS-compatible audio service');
+
 let audioContext = null;
 let audioSource = null;
 let audioBuffer = null;
 let mediaRecorder = null;
 let recordedChunks = [];
-let lastTenSecondsBuffer = [];  // Buffer to store only the last 10 seconds of audio
-let audioSampleRate = 44100; // Default sample rate
-let recordingStream = null; // Store the stream to recreate the media 
-const MAX_BUFFER_SIZE = 10; // Maximum number of 1-second chunks to keep (10 seconds)
-let audioStartTime = null; // Track when audio playbook begins
-let isRecordingActive = false; // Track if recording is currently active
-let isResetting = false; // Flag to prevent operations during reset
-let currentPlaybackTime = 0; // Track current playback position
+let lastTenSecondsBuffer = [];
+let audioSampleRate = 44100;
+let recordingStream = null;
+const MAX_BUFFER_SIZE = 10;
+let audioStartTime = null;
+let isRecordingActive = false;
+let isResetting = false;
+let currentPlaybackTime = 0;
+
+// iOS-specific variables
+let isIOS = false;
+let safariVersion = null;
+let supportedMimeType = null;
+
+// Detect iOS and Safari version
+const detectDevice = () => {
+  const userAgent = navigator.userAgent;
+  isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
+  
+  // Extract Safari version
+  const safariMatch = userAgent.match(/Version\/(\d+\.\d+)/);
+  if (safariMatch) {
+    safariVersion = parseFloat(safariMatch[1]);
+  }
+  
+  console.log('[audioService.js] Device detection:', { isIOS, safariVersion, userAgent });
+  return { isIOS, safariVersion };
+};
+
+// Determine the best supported MIME type for the current device
+const getBestSupportedMimeType = () => {
+  if (!window.MediaRecorder) {
+    console.error('[audioService.js] MediaRecorder not supported');
+    return null;
+  }
+
+  // iOS Safari priority order (based on research)
+  const iosMimeTypes = [
+    'audio/mp4',
+    'audio/mp4; codecs="mp4a.40.2"',  // AAC-LC
+    'audio/mp4; codecs="mp4a.40.5"',  // HE-AAC
+    'video/mp4',
+    'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'
+  ];
+
+  // Desktop/Chrome priority order
+  const desktopMimeTypes = [
+    'audio/webm; codecs=opus',
+    'audio/webm',
+    'audio/ogg; codecs=opus',
+    'audio/ogg',
+    'audio/mp4',
+    'audio/wav'
+  ];
+
+  const mimeTypesToTest = isIOS ? iosMimeTypes : desktopMimeTypes;
+  
+  console.log('[audioService.js] Testing MIME types for', isIOS ? 'iOS' : 'Desktop');
+  
+  for (const mimeType of mimeTypesToTest) {
+    if (MediaRecorder.isTypeSupported(mimeType)) {
+      console.log('[audioService.js] Selected MIME type:', mimeType);
+      return mimeType;
+    } else {
+      console.log('[audioService.js] MIME type not supported:', mimeType);
+    }
+  }
+  
+  console.error('[audioService.js] No supported MIME types found');
+  return null;
+};
 
 const resetRecordingState = () => {
   try {
@@ -32,6 +96,14 @@ const resetRecordingState = () => {
 };
 
 export const initializeAudio = async (audioFile, seekTime = 0) => {
+  // Detect device capabilities
+  const deviceInfo = detectDevice();
+  supportedMimeType = getBestSupportedMimeType();
+  
+  if (!supportedMimeType) {
+    throw new Error('No supported audio recording format found on this device');
+  }
+  
   resetRecordingState();
   
   try {
@@ -41,8 +113,14 @@ export const initializeAudio = async (audioFile, seekTime = 0) => {
     }
     
     if (!audioContext || audioContext.state === 'closed') {
+      // iOS requires user interaction to create AudioContext
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
       audioSampleRate = audioContext.sampleRate;
+      
+      // iOS-specific: Resume context if suspended
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
     } else if (audioContext.state === 'suspended') {
       await audioContext.resume();
     }
@@ -99,27 +177,28 @@ const setupMediaRecorder = async (stream) => {
       }
     }
     
-    const mimeTypes = [
-      'audio/webm',
-      'audio/webm;codecs=opus',
-      'audio/ogg;codecs=opus'
-    ];
+    if (!supportedMimeType) {
+      throw new Error('No supported MIME type available');
+    }
     
-    let selectedMimeType = '';
+    // iOS-specific MediaRecorder options
+    const options = { mimeType: supportedMimeType };
     
-    for (const type of mimeTypes) {
-      if (MediaRecorder.isTypeSupported(type)) {
-        selectedMimeType = type;
-        break;
+    // Add iOS-specific bitrate settings for better compatibility
+    if (isIOS) {
+      if (supportedMimeType.includes('mp4')) {
+        // Lower bitrates for iOS to prevent memory issues
+        options.audioBitsPerSecond = 64000; // 64 kbps instead of default
       }
     }
     
-    const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
+    console.log('[audioService.js] Creating MediaRecorder with options:', options);
     
     mediaRecorder = new MediaRecorder(stream, options);
     
     mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
+      if (event.data && event.data.size > 0) {
+        console.log('[audioService.js] Audio chunk received:', event.data.size, 'bytes');
         recordedChunks.push(event.data);
         
         lastTenSecondsBuffer.push({
@@ -137,9 +216,20 @@ const setupMediaRecorder = async (stream) => {
       console.error('[audioService.js] Media recorder error:', error);
     };
     
-    isRecordingActive = true;
+    mediaRecorder.onstart = () => {
+      console.log('[audioService.js] MediaRecorder started successfully');
+      isRecordingActive = true;
+    };
     
-    mediaRecorder.start(1000); // Collect data in 1-second chunks
+    mediaRecorder.onstop = () => {
+      console.log('[audioService.js] MediaRecorder stopped');
+    };
+    
+    // iOS-specific: Use shorter intervals to prevent memory issues
+    const chunkInterval = isIOS ? 500 : 1000; // 0.5s for iOS, 1s for others
+    
+    console.log('[audioService.js] Starting MediaRecorder with', chunkInterval, 'ms intervals');
+    mediaRecorder.start(chunkInterval);
     
     return mediaRecorder;
   } catch (error) {
@@ -168,21 +258,14 @@ export const stopRecording = () => {
       
       isRecordingActive = false;
       
-      const stopTimeout = setTimeout(() => {
-        processAudio(bufferCopy, chunksCopy, mediaRecorder.mimeType)
-          .then(resolve)
-          .catch(reject)
-          .finally(() => {
-            isResetting = false;
-          });
-      }, 2000);
-      
       const processAudio = async (buffer, chunks, mimeType) => {
         const processedChunks = buffer.map(item => item.data);
         
         if (processedChunks.length === 0) {
           return Promise.reject(new Error('No audio chunks recorded'));
         }
+        
+        console.log('[audioService.js] Processing', processedChunks.length, 'audio chunks');
         
         try {
           const properAudioBlob = await createProperAudioFile(processedChunks, chunks, mimeType);
@@ -194,6 +277,12 @@ export const stopRecording = () => {
             filename: `audio.${getFileExtensionFromMimeType(resultMimeType)}`
           };
           
+          console.log('[audioService.js] Audio processing complete:', {
+            size: result.audioBlob.size,
+            type: result.mimeType,
+            filename: result.filename
+          });
+          
           return result;
         } catch (error) {
           console.error('[audioService.js] Error creating proper audio file:', error);
@@ -202,22 +291,21 @@ export const stopRecording = () => {
       };
       
       const handleStop = () => {
-        clearTimeout(stopTimeout);
-        
         processAudio(bufferCopy, chunksCopy, mediaRecorder.mimeType)
           .then(result => {
             resolve(result);
             
+            // Restart recording after a brief delay
             setTimeout(() => {
               try {
-                if (recordingStream) {
+                if (recordingStream && !isResetting) {
                   setupMediaRecorder(recordingStream);
                 }
               } catch (error) {
                 console.error('[audioService.js] Error restarting media recorder:', error);
               }
               isResetting = false;
-            }, 100);
+            }, isIOS ? 200 : 100); // Longer delay for iOS
           })
           .catch(error => {
             reject(error);
@@ -225,18 +313,24 @@ export const stopRecording = () => {
           });
       };
       
-      mediaRecorder.addEventListener('stop', handleStop, { once: true });
+      // iOS-specific: Add timeout as fallback
+      const stopTimeout = setTimeout(() => {
+        console.log('[audioService.js] Stop timeout triggered, processing audio');
+        handleStop();
+      }, isIOS ? 3000 : 2000); // Longer timeout for iOS
+      
+      mediaRecorder.addEventListener('stop', () => {
+        clearTimeout(stopTimeout);
+        handleStop();
+      }, { once: true });
       
       try {
+        console.log('[audioService.js] Stopping MediaRecorder...');
         mediaRecorder.stop();
       } catch (error) {
+        console.error('[audioService.js] Error stopping MediaRecorder:', error);
         clearTimeout(stopTimeout);
-        processAudio(bufferCopy, chunksCopy, mediaRecorder.mimeType)
-          .then(resolve)
-          .catch(reject)
-          .finally(() => {
-            isResetting = false;
-          });
+        handleStop();
       }
     } catch (error) {
       console.error('[audioService.js] Error in stopRecording:', error);
@@ -247,6 +341,36 @@ export const stopRecording = () => {
 };
 
 const createProperAudioFile = async (chunks, allChunks, mimeType) => {
+  console.log('[audioService.js] Creating proper audio file:', { 
+    chunksCount: chunks.length, 
+    mimeType,
+    isIOS 
+  });
+  
+  // iOS-specific handling for MP4/AAC
+  if (isIOS && mimeType.includes('mp4')) {
+    try {
+      // For iOS MP4, we need to ensure proper container structure
+      const firstChunk = allChunks.length > 0 ? allChunks[0] : null;
+      
+      if (firstChunk) {
+        const properChunks = [firstChunk];
+        
+        for (const chunk of chunks) {
+          if (chunk !== firstChunk) {
+            properChunks.push(chunk);
+          }
+        }
+        
+        console.log('[audioService.js] Using iOS MP4 optimized blob creation');
+        return new Blob(properChunks, { type: mimeType });
+      }
+    } catch (error) {
+      console.error('[audioService.js] Error in iOS MP4 handling:', error);
+    }
+  }
+  
+  // WebM handling for desktop
   if (mimeType.includes('webm')) {
     try {
       const firstChunk = allChunks.length > 0 ? allChunks[0] : null;
@@ -263,19 +387,25 @@ const createProperAudioFile = async (chunks, allChunks, mimeType) => {
         return new Blob(properChunks, { type: mimeType });
       }
     } catch (error) {
-      console.error('[audioService.js] Error in WebM specialized handling:', error);
+      console.error('[audioService.js] Error in WebM handling:', error);
     }
   }
   
-  try {
-    const wavBlob = await convertToWav(chunks);
-    if (wavBlob) {
-      return wavBlob;
+  // For iOS, avoid WAV conversion as it can cause memory issues
+  if (!isIOS) {
+    try {
+      const wavBlob = await convertToWav(chunks);
+      if (wavBlob) {
+        console.log('[audioService.js] Successfully converted to WAV');
+        return wavBlob;
+      }
+    } catch (error) {
+      console.error('[audioService.js] Error converting to WAV:', error);
     }
-  } catch (error) {
-    console.error('[audioService.js] Error converting to WAV:', error);
   }
   
+  // Fallback: return as-is
+  console.log('[audioService.js] Using fallback blob creation');
   return new Blob(chunks, { type: mimeType });
 };
 
@@ -359,11 +489,12 @@ const writeString = (view, offset, string) => {
 };
 
 const getFileExtensionFromMimeType = (mimeType) => {
+  if (mimeType.includes('mp4')) return 'mp4';
   if (mimeType.includes('webm')) return 'webm';
   if (mimeType.includes('ogg')) return 'ogg';
   if (mimeType.includes('mp3') || mimeType.includes('mpeg')) return 'mp3';
   if (mimeType.includes('wav')) return 'wav';
-  return 'webm';
+  return isIOS ? 'mp4' : 'webm'; // Default based on platform
 };
 
 const readFileAsArrayBuffer = (file) => {
@@ -380,4 +511,14 @@ const readFileAsArrayBuffer = (file) => {
     
     reader.readAsArrayBuffer(file);
   });
+};
+
+// Export device detection for debugging
+export const getDeviceInfo = () => {
+  return {
+    isIOS,
+    safariVersion,
+    supportedMimeType,
+    userAgent: navigator.userAgent
+  };
 };
