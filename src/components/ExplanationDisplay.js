@@ -4,7 +4,7 @@ import './ExplanationDisplay.css';
 function ExplanationDisplay({ explanation, onSpeechEnd }) {
   console.log('[ExplanationDisplay.js] Rendering explanation');
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [ttsMethod, setTtsMethod] = useState('google'); // 'google' or 'browser'
+  const [ttsMethod, setTtsMethod] = useState('google');
   const [requiresUserInteraction, setRequiresUserInteraction] = useState(false);
   const audioRef = useRef(null);
   const isProcessingRef = useRef(false);
@@ -16,27 +16,20 @@ function ExplanationDisplay({ explanation, onSpeechEnd }) {
   // Get Google TTS API key from environment
   const GOOGLE_TTS_API_KEY = process.env.REACT_APP_GOOGLE_TTS_API_KEY;
   
-  // iOS-specific: Check if we can play audio without user interaction
-  const checkAutoplaySupport = async () => {
-    try {
-      const audio = new Audio();
-      const canAutoplay = await audio.play().catch(() => false);
-      if (canAutoplay !== false) {
-        audio.pause();
-        return true;
-      }
-      return false;
-    } catch (error) {
-      return false;
+  // Simple callback execution
+  const callSpeechEndCallback = () => {
+    console.log('[ExplanationDisplay.js] Calling speech end callback');
+    if (onSpeechEnd) {
+      onSpeechEnd();
     }
   };
 
-  // Enhanced Google TTS function with iOS handling
+  // Enhanced Google TTS with multiple event listeners for iOS reliability
   const speakWithGoogleTTS = async (text, userInitiated = false) => {
     if (!text || isProcessingRef.current) return;
     
     isProcessingRef.current = true;
-    console.log('[ExplanationDisplay.js] Starting Google TTS (iOS mode:', isIOS, ', User initiated:', userInitiated, ')');
+    console.log('[ExplanationDisplay.js] Starting Google TTS for iOS:', isIOS);
     
     try {
       if (!GOOGLE_TTS_API_KEY) {
@@ -51,9 +44,8 @@ function ExplanationDisplay({ explanation, onSpeechEnd }) {
 
       setIsSpeaking(true);
       setRequiresUserInteraction(false);
-      console.log('[ExplanationDisplay.js] Calling Google TTS API');
 
-      // Call Google Text-to-Speech API
+      // Call Google TTS API
       const response = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_API_KEY}`, {
         method: 'POST',
         headers: {
@@ -63,11 +55,11 @@ function ExplanationDisplay({ explanation, onSpeechEnd }) {
           input: { text: text },
           voice: {
             languageCode: 'en-US',
-            name: 'en-US-Neural2-D', // Male natural voice
+            name: 'en-US-Neural2-D',
             ssmlGender: 'MALE'
           },
           audioConfig: {
-            audioEncoding: 'MP3', // Use MP3 for better iOS compatibility
+            audioEncoding: 'MP3',
             speakingRate: 1.0,
             pitch: 0.0,
             volumeGainDb: 0.0
@@ -77,114 +69,106 @@ function ExplanationDisplay({ explanation, onSpeechEnd }) {
 
       if (!response.ok) {
         const errorData = await response.json();
-        console.error('[ExplanationDisplay.js] Google TTS API error:', errorData);
         throw new Error(`Google TTS API error: ${errorData.error?.message || 'Unknown error'}`);
       }
 
       const data = await response.json();
-      console.log('[ExplanationDisplay.js] Google TTS API response received');
-
-      // Convert base64 audio to blob and play
       const audioContent = data.audioContent;
       const audioBlob = new Blob([Uint8Array.from(atob(audioContent), c => c.charCodeAt(0))], { type: 'audio/mp3' });
       const audioUrl = URL.createObjectURL(audioBlob);
 
-      // Create and setup audio element
+      // Create audio element
       const audio = new Audio(audioUrl);
       audioRef.current = audio;
 
-      // iOS-specific audio setup
+      // iOS-specific setup
       if (isIOS) {
-        // Set additional properties for iOS compatibility
-        audio.crossOrigin = 'anonymous';
-        audio.preload = 'auto';
-        
-        // Enable inline playback for iOS
         audio.setAttribute('playsinline', 'true');
         audio.setAttribute('webkit-playsinline', 'true');
+        audio.preload = 'auto';
       }
 
-      audio.onloadstart = () => {
-        console.log('[ExplanationDisplay.js] Audio loading started');
-      };
-
-      audio.oncanplay = () => {
-        console.log('[ExplanationDisplay.js] Audio can start playing');
-        isProcessingRef.current = false;
-      };
-
-      audio.onplay = () => {
-        console.log('[ExplanationDisplay.js] Audio playback started');
-      };
-
-      audio.onended = () => {
-        console.log('[ExplanationDisplay.js] Audio playback completed');
-        setIsSpeaking(false);
+      // Multiple ways to detect when audio ends (for iOS reliability)
+      let hasEnded = false;
+      
+      const handleAudioEnd = () => {
+        if (hasEnded) return; // Prevent multiple calls
+        hasEnded = true;
         
-        // Clean up the blob URL
+        console.log('[ExplanationDisplay.js] Audio ended, cleaning up and calling callback');
+        setIsSpeaking(false);
         URL.revokeObjectURL(audioUrl);
         audioRef.current = null;
+        isProcessingRef.current = false;
         
-        // Call the callback to notify parent component
-        const timeoutId = setTimeout(() => {
-          if (onSpeechEnd) {
-            onSpeechEnd();
-          }
-        }, 300);
-        timeoutIdsRef.current.push(timeoutId);
+        // Call the callback immediately
+        callSpeechEndCallback();
       };
+
+      // Primary event listener
+      audio.onended = handleAudioEnd;
+      
+      // iOS-specific: Additional event listeners for reliability
+      if (isIOS) {
+        // Listen for other events that might indicate completion
+        audio.onpause = () => {
+          // Only treat pause as end if we're near the end of the audio
+          if (audio.currentTime > 0 && audio.duration > 0 && 
+              (audio.currentTime / audio.duration) > 0.95) {
+            console.log('[ExplanationDisplay.js] iOS audio paused near end, treating as completion');
+            handleAudioEnd();
+          }
+        };
+        
+        audio.onstalled = () => {
+          console.log('[ExplanationDisplay.js] iOS audio stalled');
+        };
+        
+        audio.onsuspend = () => {
+          console.log('[ExplanationDisplay.js] iOS audio suspended');
+        };
+      }
+
+      // Backup timer - if audio doesn't end naturally, end it after estimated duration
+      const estimatedDuration = Math.max(5000, text.length * 60); // ~60ms per character minimum 5s
+      const backupTimer = setTimeout(() => {
+        if (!hasEnded && isSpeaking) {
+          console.log('[ExplanationDisplay.js] Backup timer triggered - forcing audio end');
+          handleAudioEnd();
+        }
+      }, estimatedDuration + 2000); // Add 2s buffer
+      
+      timeoutIdsRef.current.push(backupTimer);
 
       audio.onerror = (event) => {
-        console.error('[ExplanationDisplay.js] Audio playback error:', event);
-        console.error('[ExplanationDisplay.js] Audio error details:', {
-          error: audio.error,
-          networkState: audio.networkState,
-          readyState: audio.readyState,
-          src: audio.src
-        });
-        
+        console.error('[ExplanationDisplay.js] Audio error:', event);
         setIsSpeaking(false);
         URL.revokeObjectURL(audioUrl);
         audioRef.current = null;
         isProcessingRef.current = false;
         
-        // On iOS, if audio fails and wasn't user-initiated, try browser fallback
         if (isIOS && !userInitiated) {
-          console.log('[ExplanationDisplay.js] iOS audio failed, trying browser TTS fallback');
+          console.log('[ExplanationDisplay.js] Falling back to browser speech');
           fallbackToBrowserSpeech(text);
-        } else if (isIOS) {
-          // Show user interaction requirement
-          setRequiresUserInteraction(true);
-          setTtsMethod('browser');
-          
-          // Call callback on error
-          if (onSpeechEnd) {
-            const timeoutId = setTimeout(() => onSpeechEnd(), 300);
-            timeoutIdsRef.current.push(timeoutId);
-          }
+        } else {
+          // Still call callback even on error
+          callSpeechEndCallback();
         }
       };
 
-      // iOS-specific: Handle play promise
-      console.log('[ExplanationDisplay.js] Starting audio playback');
-      
+      // Start playback
       try {
         const playPromise = audio.play();
-        
         if (playPromise !== undefined) {
           await playPromise;
-          console.log('[ExplanationDisplay.js] Audio started successfully');
+          console.log('[ExplanationDisplay.js] Google TTS started successfully');
         }
       } catch (playError) {
-        console.error('[ExplanationDisplay.js] Play promise rejected:', playError);
-        
+        console.error('[ExplanationDisplay.js] Play failed:', playError);
         if (isIOS && playError.name === 'NotAllowedError') {
-          console.log('[ExplanationDisplay.js] iOS requires user interaction for audio');
           setRequiresUserInteraction(true);
           setTtsMethod('browser');
           URL.revokeObjectURL(audioUrl);
-          
-          // Try browser speech as fallback
           fallbackToBrowserSpeech(text);
         } else {
           throw playError;
@@ -192,140 +176,98 @@ function ExplanationDisplay({ explanation, onSpeechEnd }) {
       }
 
     } catch (error) {
-      console.error('[ExplanationDisplay.js] Error with Google TTS:', error);
+      console.error('[ExplanationDisplay.js] Google TTS error:', error);
       setIsSpeaking(false);
       isProcessingRef.current = false;
-      
-      // Fallback to browser speech synthesis if Google TTS fails
-      console.log('[ExplanationDisplay.js] Falling back to browser speech synthesis');
       fallbackToBrowserSpeech(text);
     }
   };
 
-  // Enhanced browser speech synthesis with iOS optimizations
+  // Simplified browser speech fallback
   const fallbackToBrowserSpeech = (text) => {
-    try {
-      console.log('[ExplanationDisplay.js] Using browser speech synthesis fallback');
-      
-      if (window.speechSynthesis.speaking) {
-        window.speechSynthesis.cancel();
-      }
+    console.log('[ExplanationDisplay.js] Using browser speech fallback');
+    
+    if (window.speechSynthesis.speaking) {
+      window.speechSynthesis.cancel();
+    }
 
-      // Wait a moment for iOS to be ready
-      setTimeout(() => {
-        const utterance = new SpeechSynthesisUtterance(text);
-        
-        // iOS-specific voice settings
-        if (isIOS) {
-          // Get available voices and prefer English ones
-          const voices = window.speechSynthesis.getVoices();
-          const englishVoice = voices.find(voice => 
-            voice.lang.startsWith('en') && !voice.name.includes('Compact')
-          );
-          if (englishVoice) {
-            utterance.voice = englishVoice;
-          }
-          
-          // Slower rate for iOS for better quality
-          utterance.rate = 0.9;
-          utterance.pitch = 1.0;
-          utterance.volume = 1.0;
-        } else {
-          utterance.rate = 1.0;
-          utterance.pitch = 1.0;
-          utterance.volume = 1.0;
-        }
-
-        utterance.onstart = () => {
-          console.log('[ExplanationDisplay.js] Browser speech started');
-          setIsSpeaking(true);
-          setRequiresUserInteraction(false);
-        };
-
-        utterance.onend = () => {
-          console.log('[ExplanationDisplay.js] Browser speech ended');
-          setIsSpeaking(false);
-          if (onSpeechEnd) {
-            const timeoutId = setTimeout(() => onSpeechEnd(), 300);
-            timeoutIdsRef.current.push(timeoutId);
-          }
-        };
-
-        utterance.onerror = (event) => {
-          console.error('[ExplanationDisplay.js] Browser speech error:', event);
-          setIsSpeaking(false);
-          
-          if (isIOS && event.error === 'not-allowed') {
-            setRequiresUserInteraction(true);
-          }
-          
-          if (onSpeechEnd) {
-            const timeoutId = setTimeout(() => onSpeechEnd(), 300);
-            timeoutIdsRef.current.push(timeoutId);
-          }
-        };
-
-        window.speechSynthesis.speak(utterance);
-      }, isIOS ? 500 : 100);
-      
-    } catch (fallbackError) {
-      console.error('[ExplanationDisplay.js] Browser speech synthesis failed:', fallbackError);
-      setIsSpeaking(false);
+    setTimeout(() => {
+      const utterance = new SpeechSynthesisUtterance(text);
       
       if (isIOS) {
-        setRequiresUserInteraction(true);
+        const voices = window.speechSynthesis.getVoices();
+        const englishVoice = voices.find(voice => 
+          voice.lang.startsWith('en') && !voice.name.includes('Compact')
+        );
+        if (englishVoice) {
+          utterance.voice = englishVoice;
+        }
+        utterance.rate = 0.9;
+      } else {
+        utterance.rate = 1.0;
       }
-      
-      if (onSpeechEnd) {
-        onSpeechEnd();
-      }
-    }
+
+      utterance.onstart = () => {
+        console.log('[ExplanationDisplay.js] Browser speech started');
+        setIsSpeaking(true);
+        setRequiresUserInteraction(false);
+      };
+
+      utterance.onend = () => {
+        console.log('[ExplanationDisplay.js] Browser speech ended');
+        setIsSpeaking(false);
+        callSpeechEndCallback();
+      };
+
+      utterance.onerror = (event) => {
+        console.error('[ExplanationDisplay.js] Browser speech error:', event);
+        setIsSpeaking(false);
+        if (isIOS && event.error === 'not-allowed') {
+          setRequiresUserInteraction(true);
+        }
+        // Call callback even on error
+        callSpeechEndCallback();
+      };
+
+      window.speechSynthesis.speak(utterance);
+    }, isIOS ? 500 : 100);
   };
 
-  // Manual play button for iOS when user interaction is required
+  // Manual play for iOS user interaction
   const handleManualPlay = () => {
-    console.log('[ExplanationDisplay.js] Manual play triggered by user');
+    console.log('[ExplanationDisplay.js] Manual play triggered');
     setRequiresUserInteraction(false);
     
     if (ttsMethod === 'google' && GOOGLE_TTS_API_KEY) {
-      speakWithGoogleTTS(explanation, true); // true = user initiated
+      speakWithGoogleTTS(explanation, true);
     } else {
       fallbackToBrowserSpeech(explanation);
     }
   };
   
-  // Speak the explanation when it changes
+  // Start TTS when explanation changes
   useEffect(() => {
     if (explanation) {
-      console.log('[ExplanationDisplay.js] New explanation received, determining TTS method for iOS:', isIOS);
+      console.log('[ExplanationDisplay.js] Starting TTS for new explanation');
       
-      // For iOS, always try Google TTS first, but be prepared for fallback
       if (GOOGLE_TTS_API_KEY) {
-        const timeoutId = setTimeout(() => speakWithGoogleTTS(explanation, false), 300);
-        timeoutIdsRef.current.push(timeoutId);
+        setTimeout(() => speakWithGoogleTTS(explanation, false), 300);
       } else {
-        // No Google TTS available, use browser speech
-        const timeoutId = setTimeout(() => fallbackToBrowserSpeech(explanation), 300);
-        timeoutIdsRef.current.push(timeoutId);
+        setTimeout(() => fallbackToBrowserSpeech(explanation), 300);
       }
     }
     
-    // Cleanup function
+    // Cleanup
     return () => {
-      // Clear all timeouts
       timeoutIdsRef.current.forEach(id => clearTimeout(id));
       timeoutIdsRef.current = [];
       
-      // Stop any ongoing audio playback
       if (audioRef.current) {
-        console.log('[ExplanationDisplay.js] Cleaning up audio playback');
         audioRef.current.pause();
         audioRef.current = null;
       }
       
-      // Cancel any browser speech synthesis as fallback cleanup
       if (window.speechSynthesis.speaking) {
-        console.log('[ExplanationDisplay.js] Cleaning up browser speech synthesis');
         window.speechSynthesis.cancel();
       }
       
@@ -344,7 +286,6 @@ function ExplanationDisplay({ explanation, onSpeechEnd }) {
         {explanation}
       </div>
       
-      {/* iOS-specific: Show manual play button when user interaction is required */}
       {requiresUserInteraction && isIOS && (
         <div style={{
           marginTop: '15px',
@@ -376,8 +317,7 @@ function ExplanationDisplay({ explanation, onSpeechEnd }) {
       
       {isSpeaking && (
         <div className="speech-indicator">
-          Reading explanation aloud... 
-          {isIOS && <span style={{ fontSize: '12px', opacity: 0.7 }}>(iOS mode)</span>}
+          Reading explanation aloud...
           <div className="speech-animation">
             <span></span>
             <span></span>
@@ -386,7 +326,7 @@ function ExplanationDisplay({ explanation, onSpeechEnd }) {
         </div>
       )}
       
-      {/* Debug info for iOS */}
+      {/* Simple debug for development */}
       {isIOS && process.env.NODE_ENV === 'development' && (
         <div style={{ 
           marginTop: '10px', 
@@ -396,7 +336,7 @@ function ExplanationDisplay({ explanation, onSpeechEnd }) {
           padding: '8px',
           borderRadius: '4px'
         }}>
-          iOS TTS Mode: {ttsMethod} | User Interaction Required: {requiresUserInteraction ? 'Yes' : 'No'}
+          iOS Debug: Speaking={isSpeaking ? 'Yes' : 'No'}, Method={ttsMethod}, UserInteraction={requiresUserInteraction ? 'Required' : 'Not Required'}
         </div>
       )}
     </div>
