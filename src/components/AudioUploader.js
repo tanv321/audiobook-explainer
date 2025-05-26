@@ -5,13 +5,23 @@ function AudioUploader({ onFileUpload }) {
 
   const handleFileChange = (event) => {
     const file = event.target.files[0];
-    console.log('[AudioUploader.js] File selected:', file?.name);
+    console.log('[AudioUploader.js] File selected:', file?.name, 'Type:', file?.type);
     
     if (file && file.type.includes('audio')) {
       onFileUpload(file);
-    } else {
-      console.error('[AudioUploader.js] Invalid file type. Please select an audio file.');
-      alert('Please select a valid audio file (MP3, WAV, etc.)');
+    } else if (file) {
+      // Additional check for common audio file extensions in case MIME type detection fails
+      const fileName = file.name.toLowerCase();
+      const audioExtensions = ['.mp3', '.wav', '.aac', '.m4a', '.ogg', '.flac'];
+      const hasAudioExtension = audioExtensions.some(ext => fileName.endsWith(ext));
+      
+      if (hasAudioExtension) {
+        console.log('[AudioUploader.js] File has audio extension, proceeding despite MIME type');
+        onFileUpload(file);
+      } else {
+        console.error('[AudioUploader.js] Invalid file type. Please select an audio file.');
+        alert('Please select a valid audio file (MP3, WAV, AAC, etc.)');
+      }
     }
   };
 
@@ -20,7 +30,6 @@ function AudioUploader({ onFileUpload }) {
       <h2>Upload Audiobook</h2>
       <input 
         type="file" 
-        accept="audio/*" 
         onChange={handleFileChange} 
         id="audio-file-input"
       />
