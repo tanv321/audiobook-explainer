@@ -1,7 +1,9 @@
+// Updated App.js - Only the imports and return statement change
 import React, { useState, useEffect } from 'react';
 import AudioPlayer from './components/AudioPlayer';
 import ExplanationDisplay from './components/ExplanationDisplay';
 import AudioUploader from './components/AudioUploader';
+import AuthWrapper from './components/AuthWrapper'; // Add this import
 import { initializeAudio, stopRecording, getCurrentPlaybackTime, setCurrentPlaybackTime } from './services/audioService';
 import { processAudioAndGetExplanation } from './services/apiService';
 import './App.css';
@@ -18,6 +20,9 @@ function App() {
   const [audioSource, setAudioSource] = useState(null);
   const [minExplanationTime, setMinExplanationTime] = useState(null);
   const [pausedAtTime, setPausedAtTime] = useState(0);
+
+  // All your existing useEffect hooks and handlers remain exactly the same
+  // ... (keeping all the existing code from your original App.js)
 
   // Effect to clean up audio context on unmount
   useEffect(() => {
@@ -215,33 +220,36 @@ function App() {
     }
   };
 
+  // Wrap your existing JSX with AuthWrapper
   return (
-    <div className="app-container">
-      <h1>Audio Book Explainer</h1>
-      
-      <AudioUploader onFileUpload={handleFileUpload} />
-      
-      {audioFile && (
-        <AudioPlayer 
-          isPlaying={isPlaying}
-          onPlay={handlePlay}
-          onPause={handlePause}
-          onExplain={handleExplain}
-          onResume={handleResume}
-          fileName={fileName}
-          isExplaining={isExplaining}
-          audioFile={audioFile}
-          currentTime={pausedAtTime}
-        />
-      )}
-      
-      {explanation && (
-        <ExplanationDisplay 
-          explanation={explanation} 
-          onSpeechEnd={handleSpeechEnd}
-        />
-      )}
-    </div>
+    <AuthWrapper>
+      <div className="app-container">
+        <h1>Audio Book Explainer</h1>
+        
+        <AudioUploader onFileUpload={handleFileUpload} />
+        
+        {audioFile && (
+          <AudioPlayer 
+            isPlaying={isPlaying}
+            onPlay={handlePlay}
+            onPause={handlePause}
+            onExplain={handleExplain}
+            onResume={handleResume}
+            fileName={fileName}
+            isExplaining={isExplaining}
+            audioFile={audioFile}
+            currentTime={pausedAtTime}
+          />
+        )}
+        
+        {explanation && (
+          <ExplanationDisplay 
+            explanation={explanation} 
+            onSpeechEnd={handleSpeechEnd}
+          />
+        )}
+      </div>
+    </AuthWrapper>
   );
 }
 
