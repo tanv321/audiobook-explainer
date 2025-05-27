@@ -1,5 +1,5 @@
-// iOS-Compatible Audio Service - Handles audio recording, buffering, and processing
-console.log('[audioService.js] Loading iOS-compatible audio service');
+// iOS-Compatible Audio Service - Enhanced with memory management and debugging
+console.log('[audioService.js] Loading iOS-compatible audio service with enhanced memory management');
 
 let audioContext = null;
 let audioSource = null;
@@ -15,10 +15,160 @@ let isRecordingActive = false;
 let isResetting = false;
 let currentPlaybackTime = 0;
 
+// Debugging storage
+let debugLog = [];
+let lastError = null;
+
 // iOS-specific variables
 let isIOS = false;
 let safariVersion = null;
 let supportedMimeType = null;
+
+// Memory management for iOS
+const MAX_MEMORY_MB = 50; // Maximum memory usage in MB
+const CHUNK_CLEANUP_INTERVAL = 30000; // Clean up old chunks every 30 seconds
+let memoryCleanupTimer = null;
+
+// Add debug logging function
+const addDebugLog = (message, data = null) => {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    message,
+    data,
+    memory: getMemoryUsage()
+  };
+  
+  debugLog.push(logEntry);
+  console.log(`[audioService.js DEBUG ${timestamp}]`, message, data || '');
+  
+  // Keep only last 100 entries to prevent memory issues
+  if (debugLog.length > 100) {
+    debugLog.shift();
+  }
+};
+
+// Get memory usage estimate
+const getMemoryUsage = () => {
+  let totalSize = 0;
+  
+  // Calculate size of recorded chunks
+  recordedChunks.forEach(chunk => {
+    totalSize += chunk.size || 0;
+  });
+  
+  // Calculate size of buffer
+  lastTenSecondsBuffer.forEach(item => {
+    totalSize += item.data.size || 0;
+  });
+  
+  return {
+    totalBytes: totalSize,
+    totalMB: (totalSize / 1024 / 1024).toFixed(2),
+    chunksCount: recordedChunks.length,
+    bufferCount: lastTenSecondsBuffer.length
+  };
+};
+
+// Export debug information
+export const exportDebugInfo = () => {
+  const debugInfo = {
+    timestamp: new Date().toISOString(),
+    deviceInfo: {
+      isIOS,
+      safariVersion,
+      userAgent: navigator.userAgent,
+      supportedMimeType
+    },
+    memoryUsage: getMemoryUsage(),
+    audioState: {
+      isRecordingActive,
+      isResetting,
+      currentPlaybackTime,
+      audioContextState: audioContext?.state || 'not initialized',
+      mediaRecorderState: mediaRecorder?.state || 'not initialized'
+    },
+    lastError,
+    logs: debugLog.slice(-50) // Last 50 logs
+  };
+  
+  return debugInfo;
+};
+
+// Download debug info as file
+export const downloadDebugInfo = () => {
+  try {
+    const debugInfo = exportDebugInfo();
+    const jsonStr = JSON.stringify(debugInfo, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `audiobook-debug-${timestamp}.json`;
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    addDebugLog('Debug info downloaded', { filename });
+  } catch (error) {
+    console.error('[audioService.js] Error downloading debug info:', error);
+    lastError = error;
+  }
+};
+
+// Clean up old chunks to prevent memory issues
+const cleanupOldChunks = () => {
+  const memoryUsage = getMemoryUsage();
+  const maxBytes = MAX_MEMORY_MB * 1024 * 1024;
+  
+  addDebugLog('Memory cleanup check', memoryUsage);
+  
+  if (memoryUsage.totalBytes > maxBytes) {
+    addDebugLog('Memory limit exceeded, cleaning up old chunks', {
+      currentMB: memoryUsage.totalMB,
+      maxMB: MAX_MEMORY_MB
+    });
+    
+    // Keep only recent chunks
+    const chunksToKeep = Math.floor(recordedChunks.length / 2);
+    const removedChunks = recordedChunks.length - chunksToKeep;
+    recordedChunks = recordedChunks.slice(-chunksToKeep);
+    
+    addDebugLog('Cleaned up chunks', {
+      removed: removedChunks,
+      remaining: recordedChunks.length
+    });
+    
+    // Force garbage collection if available (non-standard)
+    if (window.gc) {
+      window.gc();
+    }
+  }
+};
+
+// Start memory cleanup timer
+const startMemoryCleanup = () => {
+  if (memoryCleanupTimer) {
+    clearInterval(memoryCleanupTimer);
+  }
+  
+  memoryCleanupTimer = setInterval(cleanupOldChunks, CHUNK_CLEANUP_INTERVAL);
+  addDebugLog('Started memory cleanup timer');
+};
+
+// Stop memory cleanup timer
+const stopMemoryCleanup = () => {
+  if (memoryCleanupTimer) {
+    clearInterval(memoryCleanupTimer);
+    memoryCleanupTimer = null;
+    addDebugLog('Stopped memory cleanup timer');
+  }
+};
 
 // Detect iOS and Safari version
 const detectDevice = () => {
@@ -31,14 +181,14 @@ const detectDevice = () => {
     safariVersion = parseFloat(safariMatch[1]);
   }
   
-  console.log('[audioService.js] Device detection:', { isIOS, safariVersion, userAgent });
+  addDebugLog('Device detection', { isIOS, safariVersion, userAgent });
   return { isIOS, safariVersion };
 };
 
 // Determine the best supported MIME type for the current device
 const getBestSupportedMimeType = () => {
   if (!window.MediaRecorder) {
-    console.error('[audioService.js] MediaRecorder not supported');
+    addDebugLog('MediaRecorder not supported');
     return null;
   }
 
@@ -63,50 +213,67 @@ const getBestSupportedMimeType = () => {
 
   const mimeTypesToTest = isIOS ? iosMimeTypes : desktopMimeTypes;
   
-  console.log('[audioService.js] Testing MIME types for', isIOS ? 'iOS' : 'Desktop');
+  addDebugLog('Testing MIME types', { isIOS, types: mimeTypesToTest });
   
   for (const mimeType of mimeTypesToTest) {
     if (MediaRecorder.isTypeSupported(mimeType)) {
-      console.log('[audioService.js] Selected MIME type:', mimeType);
+      addDebugLog('Selected MIME type', { mimeType });
       return mimeType;
-    } else {
-      console.log('[audioService.js] MIME type not supported:', mimeType);
     }
   }
   
-  console.error('[audioService.js] No supported MIME types found');
+  addDebugLog('No supported MIME types found');
   return null;
 };
 
 const resetRecordingState = () => {
   try {
+    addDebugLog('Resetting recording state');
+    
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
       try {
         mediaRecorder.stop();
       } catch (e) {
-        console.log('[audioService.js] Error stopping media recorder during reset:', e);
+        addDebugLog('Error stopping media recorder during reset', e);
       }
     }
+    
+    // Clear chunks and buffer
     recordedChunks = [];
     lastTenSecondsBuffer = [];
     isRecordingActive = false;
+    
+    // Clear debug log if it's getting too large
+    if (debugLog.length > 50) {
+      debugLog = debugLog.slice(-25);
+    }
+    
+    addDebugLog('Recording state reset complete');
   } catch (error) {
-    console.error('[audioService.js] Error during recording state reset:', error);
+    lastError = error;
+    addDebugLog('Error during recording state reset', error);
   }
 };
 
 export const initializeAudio = async (audioFile, seekTime = 0) => {
-  // Detect device capabilities
-  const deviceInfo = detectDevice();
-  supportedMimeType = getBestSupportedMimeType();
-  
-  if (!supportedMimeType) {
-    throw new Error('No supported audio recording format found on this device');
-  }
-  
-  resetRecordingState();
-  
   try {
+    addDebugLog('Initializing audio', { fileName: audioFile.name, seekTime });
+    
+    // Detect device capabilities
+    const deviceInfo = detectDevice();
+    supportedMimeType = getBestSupportedMimeType();
+    
+    if (!supportedMimeType) {
+      throw new Error('No supported audio recording format found on this device');
+    }
+    
+    resetRecordingState();
+    
+    // Start memory cleanup for iOS
+    if (isIOS) {
+      startMemoryCleanup();
+    }
+    
     if (audioContext && audioSource) {
       audioSource.stop();
       audioSource.disconnect();
@@ -149,9 +316,12 @@ export const initializeAudio = async (audioFile, seekTime = 0) => {
     // Start from the specified time
     audioSource.start(0, seekTime);
     
+    addDebugLog('Audio initialized successfully');
+    
     return { context: audioContext, source: audioSource };
   } catch (error) {
-    console.error('[audioService.js] Error initializing audio:', error);
+    lastError = error;
+    addDebugLog('Error initializing audio', error);
     throw error;
   }
 };
@@ -169,11 +339,13 @@ export const setCurrentPlaybackTime = (time) => {
 
 const setupMediaRecorder = async (stream) => {
   try {
+    addDebugLog('Setting up MediaRecorder');
+    
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
       try {
         mediaRecorder.stop();
       } catch (e) {
-        console.log('[audioService.js] Error stopping existing media recorder:', e);
+        addDebugLog('Error stopping existing media recorder', e);
       }
     }
     
@@ -192,13 +364,13 @@ const setupMediaRecorder = async (stream) => {
       }
     }
     
-    console.log('[audioService.js] Creating MediaRecorder with options:', options);
+    addDebugLog('Creating MediaRecorder', options);
     
     mediaRecorder = new MediaRecorder(stream, options);
     
     mediaRecorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
-        console.log('[audioService.js] Audio chunk received:', event.data.size, 'bytes');
+        addDebugLog('Audio chunk received', { size: event.data.size });
         recordedChunks.push(event.data);
         
         lastTenSecondsBuffer.push({
@@ -209,31 +381,42 @@ const setupMediaRecorder = async (stream) => {
         if (lastTenSecondsBuffer.length > MAX_BUFFER_SIZE) {
           lastTenSecondsBuffer.shift();
         }
+        
+        // Check memory usage on iOS
+        if (isIOS) {
+          const memoryUsage = getMemoryUsage();
+          if (memoryUsage.totalBytes > MAX_MEMORY_MB * 1024 * 1024 * 0.8) {
+            addDebugLog('Memory usage high, triggering cleanup', memoryUsage);
+            cleanupOldChunks();
+          }
+        }
       }
     };
     
     mediaRecorder.onerror = (error) => {
-      console.error('[audioService.js] Media recorder error:', error);
+      lastError = error;
+      addDebugLog('Media recorder error', error);
     };
     
     mediaRecorder.onstart = () => {
-      console.log('[audioService.js] MediaRecorder started successfully');
+      addDebugLog('MediaRecorder started');
       isRecordingActive = true;
     };
     
     mediaRecorder.onstop = () => {
-      console.log('[audioService.js] MediaRecorder stopped');
+      addDebugLog('MediaRecorder stopped');
     };
     
     // iOS-specific: Use shorter intervals to prevent memory issues
     const chunkInterval = isIOS ? 500 : 1000; // 0.5s for iOS, 1s for others
     
-    console.log('[audioService.js] Starting MediaRecorder with', chunkInterval, 'ms intervals');
+    addDebugLog('Starting MediaRecorder', { chunkInterval });
     mediaRecorder.start(chunkInterval);
     
     return mediaRecorder;
   } catch (error) {
-    console.error('[audioService.js] Error setting up media recorder:', error);
+    lastError = error;
+    addDebugLog('Error setting up media recorder', error);
     throw error;
   }
 };
@@ -241,13 +424,28 @@ const setupMediaRecorder = async (stream) => {
 export const stopRecording = () => {
   return new Promise((resolve, reject) => {
     try {
+      addDebugLog('Stop recording requested', {
+        mediaRecorderState: mediaRecorder?.state,
+        isRecordingActive,
+        isResetting
+      });
+      
+      // Download debug info before processing
+      if (isIOS) {
+        downloadDebugInfo();
+      }
+      
       if (!mediaRecorder || mediaRecorder.state === 'inactive' || !isRecordingActive) {
-        reject(new Error('Media recorder not active'));
+        const error = new Error('Media recorder not active');
+        lastError = error;
+        reject(error);
         return;
       }
       
       if (isResetting) {
-        reject(new Error('Reset operation in progress'));
+        const error = new Error('Reset operation in progress');
+        lastError = error;
+        reject(error);
         return;
       }
       
@@ -256,18 +454,27 @@ export const stopRecording = () => {
       const bufferCopy = [...lastTenSecondsBuffer];
       const chunksCopy = [...recordedChunks];
       
+      addDebugLog('Preparing to process audio', {
+        bufferSize: bufferCopy.length,
+        chunksSize: chunksCopy.length,
+        memoryUsage: getMemoryUsage()
+      });
+      
       isRecordingActive = false;
       
       const processAudio = async (buffer, chunks, mimeType) => {
-        const processedChunks = buffer.map(item => item.data);
-        
-        if (processedChunks.length === 0) {
-          return Promise.reject(new Error('No audio chunks recorded'));
-        }
-        
-        console.log('[audioService.js] Processing', processedChunks.length, 'audio chunks');
-        
         try {
+          const processedChunks = buffer.map(item => item.data);
+          
+          if (processedChunks.length === 0) {
+            throw new Error('No audio chunks recorded');
+          }
+          
+          addDebugLog('Processing audio chunks', {
+            count: processedChunks.length,
+            mimeType
+          });
+          
           const properAudioBlob = await createProperAudioFile(processedChunks, chunks, mimeType);
           const resultMimeType = properAudioBlob.type || mimeType;
           
@@ -277,7 +484,7 @@ export const stopRecording = () => {
             filename: `audio.${getFileExtensionFromMimeType(resultMimeType)}`
           };
           
-          console.log('[audioService.js] Audio processing complete:', {
+          addDebugLog('Audio processing complete', {
             size: result.audioBlob.size,
             type: result.mimeType,
             filename: result.filename
@@ -285,7 +492,8 @@ export const stopRecording = () => {
           
           return result;
         } catch (error) {
-          console.error('[audioService.js] Error creating proper audio file:', error);
+          lastError = error;
+          addDebugLog('Error processing audio', error);
           throw error;
         }
       };
@@ -302,12 +510,13 @@ export const stopRecording = () => {
                   setupMediaRecorder(recordingStream);
                 }
               } catch (error) {
-                console.error('[audioService.js] Error restarting media recorder:', error);
+                addDebugLog('Error restarting media recorder', error);
               }
               isResetting = false;
             }, isIOS ? 200 : 100); // Longer delay for iOS
           })
           .catch(error => {
+            lastError = error;
             reject(error);
             isResetting = false;
           });
@@ -315,7 +524,7 @@ export const stopRecording = () => {
       
       // iOS-specific: Add timeout as fallback
       const stopTimeout = setTimeout(() => {
-        console.log('[audioService.js] Stop timeout triggered, processing audio');
+        addDebugLog('Stop timeout triggered');
         handleStop();
       }, isIOS ? 3000 : 2000); // Longer timeout for iOS
       
@@ -325,15 +534,17 @@ export const stopRecording = () => {
       }, { once: true });
       
       try {
-        console.log('[audioService.js] Stopping MediaRecorder...');
+        addDebugLog('Stopping MediaRecorder');
         mediaRecorder.stop();
       } catch (error) {
-        console.error('[audioService.js] Error stopping MediaRecorder:', error);
+        lastError = error;
+        addDebugLog('Error stopping MediaRecorder', error);
         clearTimeout(stopTimeout);
         handleStop();
       }
     } catch (error) {
-      console.error('[audioService.js] Error in stopRecording:', error);
+      lastError = error;
+      addDebugLog('Error in stopRecording', error);
       reject(error);
       isResetting = false;
     }
@@ -341,7 +552,7 @@ export const stopRecording = () => {
 };
 
 const createProperAudioFile = async (chunks, allChunks, mimeType) => {
-  console.log('[audioService.js] Creating proper audio file:', { 
+  addDebugLog('Creating proper audio file', { 
     chunksCount: chunks.length, 
     mimeType,
     isIOS 
@@ -362,11 +573,12 @@ const createProperAudioFile = async (chunks, allChunks, mimeType) => {
           }
         }
         
-        console.log('[audioService.js] Using iOS MP4 optimized blob creation');
+        addDebugLog('Using iOS MP4 optimized blob creation');
         return new Blob(properChunks, { type: mimeType });
       }
     } catch (error) {
-      console.error('[audioService.js] Error in iOS MP4 handling:', error);
+      lastError = error;
+      addDebugLog('Error in iOS MP4 handling', error);
     }
   }
   
@@ -387,7 +599,8 @@ const createProperAudioFile = async (chunks, allChunks, mimeType) => {
         return new Blob(properChunks, { type: mimeType });
       }
     } catch (error) {
-      console.error('[audioService.js] Error in WebM handling:', error);
+      lastError = error;
+      addDebugLog('Error in WebM handling', error);
     }
   }
   
@@ -396,16 +609,17 @@ const createProperAudioFile = async (chunks, allChunks, mimeType) => {
     try {
       const wavBlob = await convertToWav(chunks);
       if (wavBlob) {
-        console.log('[audioService.js] Successfully converted to WAV');
+        addDebugLog('Successfully converted to WAV');
         return wavBlob;
       }
     } catch (error) {
-      console.error('[audioService.js] Error converting to WAV:', error);
+      lastError = error;
+      addDebugLog('Error converting to WAV', error);
     }
   }
   
   // Fallback: return as-is
-  console.log('[audioService.js] Using fallback blob creation');
+  addDebugLog('Using fallback blob creation');
   return new Blob(chunks, { type: mimeType });
 };
 
@@ -455,7 +669,8 @@ const convertToWav = async (chunks) => {
     
     return new Blob([wavBuffer], { type: 'audio/wav' });
   } catch (error) {
-    console.error('[audioService.js] Error in WAV conversion:', error);
+    lastError = error;
+    addDebugLog('Error in WAV conversion', error);
     return null;
   }
 };
@@ -521,4 +736,28 @@ export const getDeviceInfo = () => {
     supportedMimeType,
     userAgent: navigator.userAgent
   };
+};
+
+// Clean up on unmount
+export const cleanup = () => {
+  addDebugLog('Cleaning up audio service');
+  
+  stopMemoryCleanup();
+  
+  if (audioSource) {
+    audioSource.stop();
+    audioSource.disconnect();
+  }
+  
+  if (audioContext && audioContext.state !== 'closed') {
+    audioContext.close();
+  }
+  
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+  
+  recordedChunks = [];
+  lastTenSecondsBuffer = [];
+  debugLog = [];
 };
