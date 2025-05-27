@@ -1,5 +1,5 @@
-// iOS-Compatible API Service - Handles communication with OpenAI API
-console.log('[apiService.js] Loading iOS-compatible API service');
+// iOS-Compatible API Service - Enhanced with memory management and error handling
+console.log('[apiService.js] Loading enhanced iOS-compatible API service');
 
 // Get API key from environment variables
 const API_KEY = process.env.REACT_APP_OPENAI_API_KEY;
@@ -12,6 +12,32 @@ if (!API_KEY) {
 // iOS detection
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 
+// Maximum blob size for iOS (5MB to be safe)
+const MAX_BLOB_SIZE_IOS = 5 * 1024 * 1024;
+const MAX_BLOB_SIZE_DESKTOP = 25 * 1024 * 1024;
+
+/**
+ * Split large audio blob into smaller chunks for iOS
+ * @param {Blob} blob - The audio blob to split
+ * @param {number} maxSize - Maximum size per chunk
+ * @returns {Blob} - The first chunk or the original blob if small enough
+ */
+const splitAudioBlob = async (blob, maxSize) => {
+  if (blob.size <= maxSize) {
+    return blob;
+  }
+  
+  console.log(`[apiService.js] Blob too large (${Math.round(blob.size / 1024 / 1024)}MB), splitting...`);
+  
+  // For iOS, we'll just use the first chunk to avoid memory issues
+  const firstChunkSize = Math.min(blob.size, maxSize);
+  const firstChunk = blob.slice(0, firstChunkSize);
+  
+  console.log(`[apiService.js] Using first ${Math.round(firstChunkSize / 1024 / 1024)}MB of audio`);
+  
+  return firstChunk;
+};
+
 /**
  * Process audio data and get explanation from OpenAI
  * @param {Object} audioData - The recorded audio data object
@@ -22,8 +48,18 @@ export const processAudioAndGetExplanation = async (audioData, fileName) => {
   console.log('[apiService.js] Processing audio and getting explanation for iOS:', isIOS);
   
   try {
+    // Check blob size and split if necessary for iOS
+    const maxSize = isIOS ? MAX_BLOB_SIZE_IOS : MAX_BLOB_SIZE_DESKTOP;
+    const processedBlob = await splitAudioBlob(audioData.audioBlob, maxSize);
+    
+    // Create new audio data with processed blob
+    const processedAudioData = {
+      ...audioData,
+      audioBlob: processedBlob
+    };
+    
     // First transcribe the audio using Whisper API
-    const transcription = await transcribeAudio(audioData);
+    const transcription = await transcribeAudio(processedAudioData);
     console.log('[apiService.js] Audio transcribed successfully');
     
     // Then get explanation from ChatGPT API
@@ -33,6 +69,12 @@ export const processAudioAndGetExplanation = async (audioData, fileName) => {
     return { transcription, explanation };
   } catch (error) {
     console.error('[apiService.js] Error processing audio:', error);
+    
+    // Enhanced error message for iOS
+    if (isIOS && error.message.includes('memory')) {
+      error.message = 'iOS Memory Error: Try shorter audio segments or close other apps.';
+    }
+    
     throw error;
   }
 };

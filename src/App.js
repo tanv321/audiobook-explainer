@@ -1,10 +1,10 @@
-// Updated App.js - Fixed UI state management for Play/Pause button
+// Updated App.js - Enhanced with better error handling and debugging
 import React, { useState, useEffect } from 'react';
 import AudioPlayer from './components/AudioPlayer';
 import ExplanationDisplay from './components/ExplanationDisplay';
 import AudioUploader from './components/AudioUploader';
 import AuthWrapper from './components/AuthWrapper';
-import { initializeAudio, stopRecording, getCurrentPlaybackTime, setCurrentPlaybackTime } from './services/audioService';
+import { initializeAudio, stopRecording, getCurrentPlaybackTime, setCurrentPlaybackTime, cleanup as audioServiceCleanup, downloadDebugInfo } from './services/audioService';
 import { processAudioAndGetExplanation } from './services/apiService';
 import './App.css';
 import AudioDebugger from './components/AudioDebugger';
@@ -22,6 +22,7 @@ function App() {
   const [minExplanationTime, setMinExplanationTime] = useState(null);
   const [pausedAtTime, setPausedAtTime] = useState(0);
   const [wasPlayingBeforeExplanation, setWasPlayingBeforeExplanation] = useState(false);
+  const [error, setError] = useState(null);
 
   // iOS detection
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
@@ -39,6 +40,8 @@ function App() {
         console.log('[App.js] Cleaning up audio source');
         audioSource.disconnect();
       }
+      // Clean up the audio service
+      audioServiceCleanup();
     };
   }, [audioContext, audioSource]);
 
@@ -61,6 +64,7 @@ function App() {
     setMinExplanationTime(null);
     setPausedAtTime(0);
     setWasPlayingBeforeExplanation(false);
+    setError(null);
     
     if (audioContext && audioContext.state !== 'closed') {
       audioContext.close();
@@ -73,6 +77,8 @@ function App() {
     console.log('[App.js] Starting audio playback');
     
     try {
+      setError(null);
+      
       if (!audioFile) {
         console.error('[App.js] No audio file selected');
         return;
@@ -101,6 +107,7 @@ function App() {
       setWasPlayingBeforeExplanation(false); // Reset this flag
     } catch (error) {
       console.error('[App.js] Error starting playback:', error);
+      setError(`Error starting playback: ${error.message}`);
     }
   };
 
@@ -140,10 +147,12 @@ function App() {
   const handleExplain = async () => {
     console.log('[App.js] Explaining audio content');
     setIsExplaining(true);
+    setError(null);
     
     try {
       if (!audioContext) {
         console.error('[App.js] No audio context available');
+        setError('No audio context available. Please play the audiobook first.');
         setIsExplaining(false);
         return;
       }
@@ -171,6 +180,16 @@ function App() {
         setIsPlaying(false);
       }
       
+      // Download debug info on iOS before processing
+      if (isIOS) {
+        try {
+          downloadDebugInfo();
+        } catch (debugError) {
+          console.error('[App.js] Error downloading debug info:', debugError);
+          // Continue with explanation even if debug download fails
+        }
+      }
+      
       // Get audio data for explanation
       const recordedAudioData = await stopRecording();
       console.log('[App.js] Audio data captured for explanation');
@@ -186,9 +205,38 @@ function App() {
       setExplanation(response.explanation);
     } catch (error) {
       console.error('[App.js] Error getting explanation:', error);
+      
+      // Enhanced error messages for common issues
+      let errorMessage = 'Error getting explanation: ';
+      
+      if (error.message.includes('Media recorder not active')) {
+        errorMessage += 'Audio recording not active. Please play the audiobook first.';
+      } else if (error.message.includes('No audio chunks recorded')) {
+        errorMessage += 'No audio recorded. Make sure the audiobook is playing.';
+      } else if (error.message.includes('memory')) {
+        errorMessage += 'Memory error. Try closing other apps or using shorter segments.';
+      } else if (error.message.includes('Network')) {
+        errorMessage += 'Network error. Check your internet connection.';
+      } else if (error.message.includes('API key')) {
+        errorMessage += 'API key missing. Please configure your OpenAI API key.';
+      } else {
+        errorMessage += error.message;
+      }
+      
+      setError(errorMessage);
+      
       // If there was an error, restore play state if we were playing before
       if (wasPlayingBeforeExplanation) {
         setIsPlaying(true);
+      }
+      
+      // Download debug info on error
+      if (isIOS) {
+        try {
+          downloadDebugInfo();
+        } catch (debugError) {
+          console.error('[App.js] Error downloading debug info on error:', debugError);
+        }
       }
     } finally {
       setIsExplaining(false);
@@ -261,6 +309,21 @@ function App() {
             audioFile={audioFile}
             currentTime={pausedAtTime}
           />
+        )}
+        
+        {error && (
+          <div style={{
+            margin: '20px auto',
+            padding: '15px',
+            background: '#fee',
+            border: '1px solid #fcc',
+            borderRadius: '8px',
+            color: '#c00',
+            maxWidth: '600px',
+            textAlign: 'center'
+          }}>
+            <strong>Error:</strong> {error}
+          </div>
         )}
         
         {explanation && (
