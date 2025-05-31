@@ -3,7 +3,7 @@ import './FileUpload.css';
 
 /**
  * FileUpload Component
- * Handles audiobook file uploads and validates file type
+ * Handles audiobook file uploads and validates file typ
  */
 const FileUpload = ({ onFileSelect }) => {
   const [dragActive, setDragActive] = useState(false);
