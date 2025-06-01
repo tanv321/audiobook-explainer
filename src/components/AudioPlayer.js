@@ -20,6 +20,9 @@ function AudioPlayer({
   const animationFrame = useRef(null);
   const scrubberRef = useRef(null);
 
+  // iOS detection
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
   // Update internal current time when prop changes
   useEffect(() => {
     if (propCurrentTime !== undefined) {
@@ -28,31 +31,48 @@ function AudioPlayer({
     }
   }, [propCurrentTime]);
 
-  // Setup Media Session API for car controls
+  // Enhanced Media Session API setup with iOS PWA error handling
   useEffect(() => {
     if ('mediaSession' in navigator) {
-      // Set metadata
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: fileName || 'Audiobook',
-        artist: 'AI Explained Audiobook',
-        album: 'Audiobook Collection',
-      });
+      try {
+        // Set metadata
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: fileName || 'Audiobook',
+          artist: 'AI Explained Audiobook',
+          album: 'Audiobook Collection',
+        });
 
-      // Set up action handlers
-      navigator.mediaSession.setActionHandler('play', () => {
+        console.log('[AudioPlayer] Media Session metadata set successfully');
+      } catch (error) {
+        console.warn('[AudioPlayer] Failed to set Media Session metadata:', error);
+      }
+
+      // Set up action handlers with error handling
+      const setupActionHandler = (action, handler) => {
+        try {
+          navigator.mediaSession.setActionHandler(action, handler);
+          console.log(`[AudioPlayer] Media Session ${action} handler set successfully`);
+        } catch (error) {
+          console.warn(`[AudioPlayer] Failed to set Media Session ${action} handler:`, error);
+        }
+      };
+
+      setupActionHandler('play', () => {
         if (!isExplaining) {
+          console.log('[AudioPlayer] Media Session play triggered');
           onPlay();
         }
       });
 
-      navigator.mediaSession.setActionHandler('pause', () => {
+      setupActionHandler('pause', () => {
         if (!isExplaining) {
+          console.log('[AudioPlayer] Media Session pause triggered');
           onPause();
         }
       });
 
       // Map the previoustrack action to explain functionality
-      navigator.mediaSession.setActionHandler('previoustrack', () => {
+      setupActionHandler('previoustrack', () => {
         console.log('[AudioPlayer] Car back button pressed - triggering explain');
         if (!isExplaining && (isPlaying || fileName)) {
           onExplain();
@@ -60,33 +80,81 @@ function AudioPlayer({
       });
 
       // Optional: You could also map seekbackward to explain
-      navigator.mediaSession.setActionHandler('seekbackward', (event) => {
+      setupActionHandler('seekbackward', (event) => {
         console.log('[AudioPlayer] Car seek backward pressed - triggering explain');
         if (!isExplaining && (isPlaying || fileName)) {
           onExplain();
         }
       });
 
-      // Update playback state
-      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+      // Update playback state with error handling
+      try {
+        navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+        console.log('[AudioPlayer] Media Session playback state updated:', isPlaying ? 'playing' : 'paused');
+      } catch (error) {
+        console.warn('[AudioPlayer] Failed to update Media Session playback state:', error);
+      }
 
-      // Update position state if we have duration
-      if (duration > 0) {
-        navigator.mediaSession.setPositionState({
-          duration: duration,
-          playbackRate: 1,
-          position: currentTime
-        });
+      // Update position state with enhanced iOS PWA error handling
+      if (duration > 0 && !isNaN(duration) && !isNaN(currentTime)) {
+        try {
+          // iOS PWA specific validation
+          const positionData = {
+            duration: Math.max(0, Number(duration)) || 0,
+            playbackRate: 1.0,
+            position: Math.max(0, Math.min(Number(currentTime) || 0, Number(duration) || 0))
+          };
+
+          // Additional validation for iOS
+          if (isIOS) {
+            // Ensure all values are finite numbers
+            if (!isFinite(positionData.duration) || 
+                !isFinite(positionData.position) || 
+                !isFinite(positionData.playbackRate)) {
+              console.warn('[AudioPlayer] Invalid position data for iOS, skipping setPositionState');
+              return;
+            }
+
+            // Ensure position is not greater than duration
+            if (positionData.position > positionData.duration) {
+              positionData.position = positionData.duration;
+            }
+
+            // Ensure minimum values
+            if (positionData.duration < 0.1) {
+              console.warn('[AudioPlayer] Duration too small for iOS setPositionState, skipping');
+              return;
+            }
+          }
+
+          console.log('[AudioPlayer] Setting position state:', positionData);
+          navigator.mediaSession.setPositionState(positionData);
+          console.log('[AudioPlayer] Media Session position state updated successfully');
+        } catch (error) {
+          console.warn('[AudioPlayer] Failed to update Media Session position state:', error);
+          
+          // On iOS, if setPositionState fails, we can still use the other Media Session features
+          if (isIOS) {
+            console.log('[AudioPlayer] Continuing without position state on iOS');
+          }
+        }
+      } else {
+        console.log('[AudioPlayer] Skipping position state update - invalid duration or currentTime');
       }
     }
 
-    // Cleanup functionaa
+    // Cleanup function
     return () => {
       if ('mediaSession' in navigator) {
-        navigator.mediaSession.setActionHandler('play', null);
-        navigator.mediaSession.setActionHandler('pause', null);
-        navigator.mediaSession.setActionHandler('previoustrack', null);
-        navigator.mediaSession.setActionHandler('seekbackward', null);
+        try {
+          navigator.mediaSession.setActionHandler('play', null);
+          navigator.mediaSession.setActionHandler('pause', null);
+          navigator.mediaSession.setActionHandler('previoustrack', null);
+          navigator.mediaSession.setActionHandler('seekbackward', null);
+          console.log('[AudioPlayer] Media Session handlers cleaned up');
+        } catch (error) {
+          console.warn('[AudioPlayer] Error cleaning up Media Session handlers:', error);
+        }
       }
     };
   }, [isPlaying, isExplaining, fileName, onPlay, onPause, onExplain, duration, currentTime]);
@@ -115,11 +183,26 @@ function AudioPlayer({
       audio.preload = 'metadata';
       
       audio.addEventListener('loadedmetadata', () => {
-        setDuration(audio.duration);
-        if (!propCurrentTime) {
-          setCurrentTime(0);
-          pausedAt.current = 0;
+        const audioDuration = audio.duration;
+        
+        // Validate duration before setting
+        if (isFinite(audioDuration) && audioDuration > 0) {
+          setDuration(audioDuration);
+          console.log('[AudioPlayer] Audio duration set:', audioDuration);
+          
+          if (!propCurrentTime) {
+            setCurrentTime(0);
+            pausedAt.current = 0;
+          }
+        } else {
+          console.warn('[AudioPlayer] Invalid audio duration:', audioDuration);
+          setDuration(0);
         }
+      });
+
+      audio.addEventListener('error', (error) => {
+        console.error('[AudioPlayer] Error loading audio metadata:', error);
+        setDuration(0);
       });
 
       audio.src = URL.createObjectURL(audioFile);
@@ -128,7 +211,7 @@ function AudioPlayer({
         URL.revokeObjectURL(audio.src);
       };
     }
-  }, [audioFile]);
+  }, [audioFile, propCurrentTime]);
 
   // Handle play/pause state changes
   useEffect(() => {
@@ -156,6 +239,7 @@ function AudioPlayer({
 
   // Format time display
   const formatTime = (time) => {
+    if (!isFinite(time) || time < 0) return '0:00';
     const minutes = Math.floor(time / 60);
     const seconds = Math.floor(time % 60);
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
@@ -163,14 +247,16 @@ function AudioPlayer({
 
   // Handle scrubber interactions
   const handleScrubberClick = (e) => {
-    if (!scrubberRef.current || isDragging) return;
+    if (!scrubberRef.current || isDragging || !duration || !isFinite(duration)) return;
     
     const rect = scrubberRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const percentage = clickX / rect.width;
     const newTime = Math.max(0, Math.min(duration, percentage * duration));
     
-    seekTo(newTime);
+    if (isFinite(newTime)) {
+      seekTo(newTime);
+    }
   };
 
   const handleMouseDown = (e) => {
@@ -179,25 +265,29 @@ function AudioPlayer({
   };
 
   const handleMouseMove = (e) => {
-    if (!isDragging || !scrubberRef.current) return;
+    if (!isDragging || !scrubberRef.current || !duration || !isFinite(duration)) return;
     
     const rect = scrubberRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const percentage = Math.max(0, Math.min(1, clickX / rect.width));
     const newTime = percentage * duration;
     
-    setCurrentTime(newTime);
+    if (isFinite(newTime)) {
+      setCurrentTime(newTime);
+    }
   };
 
   const handleMouseUp = (e) => {
-    if (!isDragging) return;
+    if (!isDragging || !duration || !isFinite(duration)) return;
     
     const rect = scrubberRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const percentage = Math.max(0, Math.min(1, clickX / rect.width));
     const newTime = percentage * duration;
     
-    seekTo(newTime);
+    if (isFinite(newTime)) {
+      seekTo(newTime);
+    }
     setIsDragging(false);
   };
 
@@ -216,6 +306,8 @@ function AudioPlayer({
 
   // Seek to specific time
   const seekTo = (time) => {
+    if (!isFinite(time) || !isFinite(duration)) return;
+    
     const newTime = Math.max(0, Math.min(duration, time));
     setCurrentTime(newTime);
     pausedAt.current = newTime;
@@ -231,8 +323,9 @@ function AudioPlayer({
     }
   };
 
-  // Calculate progress percentage
-  const progressPercentage = duration > 0 ? (currentTime / duration) * 100 : 0;
+  // Calculate progress percentage with safety checks
+  const progressPercentage = (duration > 0 && isFinite(duration) && isFinite(currentTime)) ? 
+    (currentTime / duration) * 100 : 0;
 
   console.log('[AudioPlayer.js] Rendering AudioPlayer component, playing status:', isPlaying);
 
@@ -256,11 +349,11 @@ function AudioPlayer({
         <div className="scrubber-track">
           <div 
             className="scrubber-progress"
-            style={{ width: `${progressPercentage}%` }}
+            style={{ width: `${Math.max(0, Math.min(100, progressPercentage))}%` }}
           />
           <div 
             className="scrubber-thumb"
-            style={{ left: `${progressPercentage}%` }}
+            style={{ left: `${Math.max(0, Math.min(100, progressPercentage))}%` }}
           />
         </div>
       </div>
@@ -305,6 +398,22 @@ function AudioPlayer({
         <br/>
         <small><strong>Car users:</strong> Press the back/previous button on your car stereo to trigger explanations.</small>
       </p>
+      
+      {/* iOS PWA Debug Info */}
+      {isIOS && process.env.NODE_ENV === 'development' && (
+        <div style={{
+          marginTop: '10px',
+          padding: '8px',
+          background: '#f8f9fa',
+          borderRadius: '4px',
+          fontSize: '12px',
+          color: '#666'
+        }}>
+          iOS PWA Debug: Duration={isFinite(duration) ? duration.toFixed(1) : 'invalid'}, 
+          CurrentTime={isFinite(currentTime) ? currentTime.toFixed(1) : 'invalid'}, 
+          Progress={progressPercentage.toFixed(1)}%
+        </div>
+      )}
     </div>
   );
 }
