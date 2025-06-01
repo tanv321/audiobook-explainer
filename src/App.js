@@ -185,11 +185,12 @@ function App() {
       const wasCurrentlyPlaying = isPlaying;
       setWasPlayingBeforeExplanation(wasCurrentlyPlaying);
       
-      // Store current position and STOP playback
+      // Store current position BEFORE stopping playback
+      let currentPosition = pausedAtTime;
       if (isPlaying) {
-        const currentTime = getCurrentPlaybackTime();
-        setPausedAtTime(currentTime);
-        console.log('[App.js] Stopping playback for explanation at time:', currentTime);
+        currentPosition = getCurrentPlaybackTime();
+        setPausedAtTime(currentPosition); // Update the paused position immediately
+        console.log('[App.js] Stopping playback for explanation at time:', currentPosition);
         
         if (audioSource) {
           audioSource.stop();

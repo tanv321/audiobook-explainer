@@ -28,8 +28,13 @@ function AudioPlayer({
     if (propCurrentTime !== undefined) {
       setCurrentTime(propCurrentTime);
       pausedAt.current = propCurrentTime;
+      
+      // If we're explaining, don't restart the playback timer
+      if (!isExplaining) {
+        playbackStartTime.current = isPlaying ? Date.now() : null;
+      }
     }
-  }, [propCurrentTime]);
+  }, [propCurrentTime, isExplaining, isPlaying]);
 
   // Enhanced Media Session API setup with iOS PWA error handling
   useEffect(() => {
@@ -161,7 +166,8 @@ function AudioPlayer({
 
   // Calculate and update current time
   const updateCurrentTime = () => {
-    if (isPlaying && playbackStartTime.current !== null) {
+    // Only update time if we're actually playing AND not explaining
+    if (isPlaying && !isExplaining && playbackStartTime.current !== null) {
       const elapsed = (Date.now() - playbackStartTime.current) / 1000;
       const newCurrentTime = pausedAt.current + elapsed;
       
@@ -215,18 +221,23 @@ function AudioPlayer({
 
   // Handle play/pause state changes
   useEffect(() => {
-    if (isPlaying) {
+    if (isPlaying && !isExplaining) {
+      // Only start time tracking if we're playing and not explaining
       playbackStartTime.current = Date.now();
       updateCurrentTime();
     } else {
+      // Stop time tracking if paused OR explaining
       if (animationFrame.current) {
         cancelAnimationFrame(animationFrame.current);
       }
-      if (playbackStartTime.current !== null) {
+      
+      if (playbackStartTime.current !== null && !isExplaining) {
+        // Only update pausedAt if we're not explaining (to avoid time jumps)
         const elapsed = (Date.now() - playbackStartTime.current) / 1000;
         pausedAt.current += elapsed;
         setCurrentTime(pausedAt.current);
       }
+      
       playbackStartTime.current = null;
     }
 
@@ -235,7 +246,7 @@ function AudioPlayer({
         cancelAnimationFrame(animationFrame.current);
       }
     };
-  }, [isPlaying]);
+  }, [isPlaying, isExplaining]); // Added isExplaining as dependency
 
   // Format time display
   const formatTime = (time) => {
