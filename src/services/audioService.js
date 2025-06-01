@@ -1,5 +1,5 @@
-// iOS-Compatible Audio Service - Handles audio recording, buffering, and processing
-console.log('[audioService.js] Loading iOS-compatible audio service');
+// iOS-Compatible Audio Service - Fixed buffer management and comprehensive logging
+console.log('[audioService.js] Loading improved iOS-compatible audio service with enhanced logging');
 
 let audioContext = null;
 let audioSource = null;
@@ -9,16 +9,81 @@ let recordedChunks = [];
 let lastTenSecondsBuffer = [];
 let audioSampleRate = 44100;
 let recordingStream = null;
-const MAX_BUFFER_SIZE = 10;
+const MAX_BUFFER_SIZE = 20; // Increased for better 10-second coverage
 let audioStartTime = null;
 let isRecordingActive = false;
 let isResetting = false;
 let currentPlaybackTime = 0;
 
+// Enhanced logging system
+let debugLogs = [];
+const MAX_LOG_ENTRIES = 1000;
+
 // iOS-specific variables
 let isIOS = false;
 let safariVersion = null;
 let supportedMimeType = null;
+
+// Buffer management variables
+let bufferStartTime = null;
+let chunkDuration = 500; // milliseconds per chunk
+let maxChunksFor10Seconds = Math.ceil(10000 / chunkDuration); // 20 chunks for 10 seconds
+
+// Enhanced logging function
+const logDebug = (message, data = null) => {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    message,
+    data: data ? JSON.stringify(data) : null,
+    memoryUsage: performance.memory ? {
+      used: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024),
+      total: Math.round(performance.memory.totalJSHeapSize / 1024 / 1024)
+    } : null
+  };
+  
+  debugLogs.push(logEntry);
+  
+  // Keep only the last MAX_LOG_ENTRIES
+  if (debugLogs.length > MAX_LOG_ENTRIES) {
+    debugLogs = debugLogs.slice(-MAX_LOG_ENTRIES);
+  }
+  
+  console.log(`[audioService.js] ${message}`, data || '');
+};
+
+// Download debug logs as file
+export const downloadDebugLogs = () => {
+  try {
+    const logData = {
+      deviceInfo: getDeviceInfo(),
+      timestamp: new Date().toISOString(),
+      logs: debugLogs,
+      bufferState: {
+        bufferSize: lastTenSecondsBuffer.length,
+        maxBufferSize: MAX_BUFFER_SIZE,
+        chunksFor10Seconds: maxChunksFor10Seconds,
+        chunkDuration,
+        isRecordingActive,
+        supportedMimeType
+      }
+    };
+    
+    const blob = new Blob([JSON.stringify(logData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `audiobook-debug-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    logDebug('Debug logs downloaded successfully');
+  } catch (error) {
+    logDebug('Error downloading debug logs', { error: error.message });
+  }
+};
 
 // Detect iOS and Safari version
 const detectDevice = () => {
@@ -31,14 +96,14 @@ const detectDevice = () => {
     safariVersion = parseFloat(safariMatch[1]);
   }
   
-  console.log('[audioService.js] Device detection:', { isIOS, safariVersion, userAgent });
+  logDebug('Device detection completed', { isIOS, safariVersion, userAgent });
   return { isIOS, safariVersion };
 };
 
 // Determine the best supported MIME type for the current device
 const getBestSupportedMimeType = () => {
   if (!window.MediaRecorder) {
-    console.error('[audioService.js] MediaRecorder not supported');
+    logDebug('MediaRecorder not supported');
     return null;
   }
 
@@ -46,9 +111,7 @@ const getBestSupportedMimeType = () => {
   const iosMimeTypes = [
     'audio/mp4',
     'audio/mp4; codecs="mp4a.40.2"',  // AAC-LC
-    'audio/mp4; codecs="mp4a.40.5"',  // HE-AAC
-    'video/mp4',
-    'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'
+    'video/mp4', // Sometimes iOS MediaRecorder only supports video container
   ];
 
   // Desktop/Chrome priority order
@@ -56,52 +119,97 @@ const getBestSupportedMimeType = () => {
     'audio/webm; codecs=opus',
     'audio/webm',
     'audio/ogg; codecs=opus',
-    'audio/ogg',
-    'audio/mp4',
-    'audio/wav'
   ];
 
   const mimeTypesToTest = isIOS ? iosMimeTypes : desktopMimeTypes;
   
-  console.log('[audioService.js] Testing MIME types for', isIOS ? 'iOS' : 'Desktop');
+  logDebug('Testing MIME types', { platform: isIOS ? 'iOS' : 'Desktop', types: mimeTypesToTest });
   
+  const supportResults = {};
   for (const mimeType of mimeTypesToTest) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
-      console.log('[audioService.js] Selected MIME type:', mimeType);
+    const isSupported = MediaRecorder.isTypeSupported(mimeType);
+    supportResults[mimeType] = isSupported;
+    
+    if (isSupported) {
+      logDebug('Selected MIME type', { mimeType });
       return mimeType;
-    } else {
-      console.log('[audioService.js] MIME type not supported:', mimeType);
     }
   }
   
-  console.error('[audioService.js] No supported MIME types found');
+  logDebug('No supported MIME types found', { supportResults });
   return null;
+};
+
+// Enhanced buffer management - keep only the last 10 seconds
+const manageBuffer = () => {
+  if (!bufferStartTime) {
+    bufferStartTime = Date.now();
+  }
+  
+  const currentTime = Date.now();
+  const tenSecondsAgo = currentTime - 10000; // 10 seconds in milliseconds
+  
+  // Remove chunks older than 10 seconds
+  lastTenSecondsBuffer = lastTenSecondsBuffer.filter(chunk => chunk.timestamp >= tenSecondsAgo);
+  
+  // Also limit by count as a safety measure
+  if (lastTenSecondsBuffer.length > maxChunksFor10Seconds) {
+    const excessChunks = lastTenSecondsBuffer.length - maxChunksFor10Seconds;
+    lastTenSecondsBuffer.splice(0, excessChunks);
+    logDebug('Buffer trimmed by count', { 
+      removed: excessChunks, 
+      remaining: lastTenSecondsBuffer.length 
+    });
+  }
+  
+  // Log buffer state periodically (every 20 chunks)
+  if (lastTenSecondsBuffer.length % 20 === 0) {
+    const oldestChunk = lastTenSecondsBuffer[0];
+    const newestChunk = lastTenSecondsBuffer[lastTenSecondsBuffer.length - 1];
+    
+    logDebug('Buffer state check', {
+      bufferSize: lastTenSecondsBuffer.length,
+      timeSpan: oldestChunk && newestChunk ? 
+        (newestChunk.timestamp - oldestChunk.timestamp) / 1000 : 0,
+      oldestAge: oldestChunk ? (currentTime - oldestChunk.timestamp) / 1000 : 0
+    });
+  }
 };
 
 const resetRecordingState = () => {
   try {
+    logDebug('Resetting recording state');
+    
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
       try {
         mediaRecorder.stop();
       } catch (e) {
-        console.log('[audioService.js] Error stopping media recorder during reset:', e);
+        logDebug('Error stopping media recorder during reset', { error: e.message });
       }
     }
+    
     recordedChunks = [];
     lastTenSecondsBuffer = [];
+    bufferStartTime = null;
     isRecordingActive = false;
+    
+    logDebug('Recording state reset complete');
   } catch (error) {
-    console.error('[audioService.js] Error during recording state reset:', error);
+    logDebug('Error during recording state reset', { error: error.message });
   }
 };
 
 export const initializeAudio = async (audioFile, seekTime = 0) => {
+  logDebug('Initializing audio', { fileName: audioFile.name, seekTime });
+  
   // Detect device capabilities
   const deviceInfo = detectDevice();
   supportedMimeType = getBestSupportedMimeType();
   
   if (!supportedMimeType) {
-    throw new Error('No supported audio recording format found on this device');
+    const error = 'No supported audio recording format found on this device';
+    logDebug('Initialization failed', { error });
+    throw new Error(error);
   }
   
   resetRecordingState();
@@ -117,16 +225,29 @@ export const initializeAudio = async (audioFile, seekTime = 0) => {
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
       audioSampleRate = audioContext.sampleRate;
       
+      logDebug('AudioContext created', { 
+        sampleRate: audioSampleRate, 
+        state: audioContext.state 
+      });
+      
       // iOS-specific: Resume context if suspended
       if (audioContext.state === 'suspended') {
         await audioContext.resume();
+        logDebug('AudioContext resumed from suspended state');
       }
     } else if (audioContext.state === 'suspended') {
       await audioContext.resume();
+      logDebug('AudioContext resumed');
     }
     
     const arrayBuffer = await readFileAsArrayBuffer(audioFile);
     audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    
+    logDebug('Audio buffer decoded', { 
+      duration: audioBuffer.duration,
+      sampleRate: audioBuffer.sampleRate,
+      numberOfChannels: audioBuffer.numberOfChannels
+    });
     
     audioSource = audioContext.createBufferSource();
     audioSource.buffer = audioBuffer;
@@ -145,13 +266,16 @@ export const initializeAudio = async (audioFile, seekTime = 0) => {
     
     audioStartTime = Date.now();
     currentPlaybackTime = seekTime;
+    bufferStartTime = Date.now(); // Reset buffer timing
     
     // Start from the specified time
     audioSource.start(0, seekTime);
     
+    logDebug('Audio playback started', { seekTime, audioStartTime });
+    
     return { context: audioContext, source: audioSource };
   } catch (error) {
-    console.error('[audioService.js] Error initializing audio:', error);
+    logDebug('Error initializing audio', { error: error.message });
     throw error;
   }
 };
@@ -165,15 +289,18 @@ export const getCurrentPlaybackTime = () => {
 export const setCurrentPlaybackTime = (time) => {
   currentPlaybackTime = time;
   audioStartTime = Date.now();
+  logDebug('Playback time set', { time });
 };
 
 const setupMediaRecorder = async (stream) => {
   try {
+    logDebug('Setting up MediaRecorder', { supportedMimeType });
+    
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
       try {
         mediaRecorder.stop();
       } catch (e) {
-        console.log('[audioService.js] Error stopping existing media recorder:', e);
+        logDebug('Error stopping existing media recorder', { error: e.message });
       }
     }
     
@@ -186,54 +313,72 @@ const setupMediaRecorder = async (stream) => {
     
     // Add iOS-specific bitrate settings for better compatibility
     if (isIOS) {
-      if (supportedMimeType.includes('mp4')) {
-        // Lower bitrates for iOS to prevent memory issues
-        options.audioBitsPerSecond = 64000; // 64 kbps instead of default
-      }
+      // Lower bitrates for iOS to prevent memory issues
+      options.audioBitsPerSecond = 48000; // Reduced from 64000
+      chunkDuration = 500; // 0.5 second chunks for iOS
+      maxChunksFor10Seconds = Math.ceil(10000 / chunkDuration);
+    } else {
+      chunkDuration = 1000; // 1 second chunks for desktop
+      maxChunksFor10Seconds = Math.ceil(10000 / chunkDuration);
     }
     
-    console.log('[audioService.js] Creating MediaRecorder with options:', options);
+    logDebug('MediaRecorder options', { 
+      options, 
+      chunkDuration, 
+      maxChunksFor10Seconds 
+    });
     
     mediaRecorder = new MediaRecorder(stream, options);
     
     mediaRecorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
-        console.log('[audioService.js] Audio chunk received:', event.data.size, 'bytes');
+        const chunkInfo = {
+          size: event.data.size,
+          type: event.data.type,
+          timestamp: Date.now()
+        };
+        
+        logDebug('Audio chunk received', chunkInfo);
+        
         recordedChunks.push(event.data);
         
         lastTenSecondsBuffer.push({
           timestamp: Date.now(),
-          data: event.data
+          data: event.data,
+          size: event.data.size
         });
         
-        if (lastTenSecondsBuffer.length > MAX_BUFFER_SIZE) {
-          lastTenSecondsBuffer.shift();
+        // Enhanced buffer management
+        manageBuffer();
+        
+        // Prevent unlimited growth of recordedChunks
+        if (recordedChunks.length > 1000) { // Keep last 1000 chunks max
+          const removedCount = recordedChunks.length - 500; // Keep last 500
+          recordedChunks.splice(0, removedCount);
+          logDebug('Main chunks array trimmed', { removed: removedCount });
         }
       }
     };
     
     mediaRecorder.onerror = (error) => {
-      console.error('[audioService.js] Media recorder error:', error);
+      logDebug('Media recorder error', { error: error.toString() });
     };
     
     mediaRecorder.onstart = () => {
-      console.log('[audioService.js] MediaRecorder started successfully');
+      logDebug('MediaRecorder started successfully');
       isRecordingActive = true;
     };
     
     mediaRecorder.onstop = () => {
-      console.log('[audioService.js] MediaRecorder stopped');
+      logDebug('MediaRecorder stopped');
     };
     
-    // iOS-specific: Use shorter intervals to prevent memory issues
-    const chunkInterval = isIOS ? 500 : 1000; // 0.5s for iOS, 1s for others
-    
-    console.log('[audioService.js] Starting MediaRecorder with', chunkInterval, 'ms intervals');
-    mediaRecorder.start(chunkInterval);
+    logDebug('Starting MediaRecorder', { chunkInterval: chunkDuration });
+    mediaRecorder.start(chunkDuration);
     
     return mediaRecorder;
   } catch (error) {
-    console.error('[audioService.js] Error setting up media recorder:', error);
+    logDebug('Error setting up media recorder', { error: error.message });
     throw error;
   }
 };
@@ -241,35 +386,81 @@ const setupMediaRecorder = async (stream) => {
 export const stopRecording = () => {
   return new Promise((resolve, reject) => {
     try {
+      logDebug('Stop recording requested', {
+        mediaRecorderState: mediaRecorder?.state,
+        isRecordingActive,
+        bufferSize: lastTenSecondsBuffer.length
+      });
+      
       if (!mediaRecorder || mediaRecorder.state === 'inactive' || !isRecordingActive) {
-        reject(new Error('Media recorder not active'));
+        const error = 'Media recorder not active';
+        logDebug('Stop recording failed', { error });
+        reject(new Error(error));
         return;
       }
       
       if (isResetting) {
-        reject(new Error('Reset operation in progress'));
+        const error = 'Reset operation in progress';
+        logDebug('Stop recording failed', { error });
+        reject(new Error(error));
         return;
       }
       
       isResetting = true;
       
+      // Create a clean copy of the buffer for the last 10 seconds
       const bufferCopy = [...lastTenSecondsBuffer];
       const chunksCopy = [...recordedChunks];
+      
+      // Validate buffer before processing
+      if (bufferCopy.length === 0) {
+        const error = 'No audio chunks in buffer';
+        logDebug('Stop recording failed', { error });
+        isResetting = false;
+        reject(new Error(error));
+        return;
+      }
+      
+      const bufferAnalysis = {
+        totalChunks: bufferCopy.length,
+        totalSize: bufferCopy.reduce((sum, chunk) => sum + chunk.size, 0),
+        timeSpan: bufferCopy.length > 1 ? 
+          (bufferCopy[bufferCopy.length - 1].timestamp - bufferCopy[0].timestamp) / 1000 : 0,
+        oldestChunkAge: (Date.now() - bufferCopy[0].timestamp) / 1000
+      };
+      
+      logDebug('Buffer analysis before processing', bufferAnalysis);
       
       isRecordingActive = false;
       
       const processAudio = async (buffer, chunks, mimeType) => {
-        const processedChunks = buffer.map(item => item.data);
-        
-        if (processedChunks.length === 0) {
-          return Promise.reject(new Error('No audio chunks recorded'));
-        }
-        
-        console.log('[audioService.js] Processing', processedChunks.length, 'audio chunks');
-        
         try {
+          logDebug('Processing audio', { 
+            bufferChunks: buffer.length, 
+            totalChunks: chunks.length, 
+            mimeType 
+          });
+          
+          // Extract just the data blobs from buffer
+          const processedChunks = buffer.map(item => item.data);
+          
+          if (processedChunks.length === 0) {
+            throw new Error('No audio chunks to process');
+          }
+          
+          // Enhanced audio blob creation with validation
           const properAudioBlob = await createProperAudioFile(processedChunks, chunks, mimeType);
           const resultMimeType = properAudioBlob.type || mimeType;
+          
+          // Validate the created blob
+          if (properAudioBlob.size === 0) {
+            throw new Error('Created audio blob is empty');
+          }
+          
+          // iOS-specific size validation
+          if (isIOS && properAudioBlob.size > 25 * 1024 * 1024) { // 25MB limit
+            throw new Error(`Audio blob too large for iOS: ${Math.round(properAudioBlob.size / 1024 / 1024)}MB`);
+          }
           
           const result = {
             audioBlob: properAudioBlob,
@@ -277,15 +468,16 @@ export const stopRecording = () => {
             filename: `audio.${getFileExtensionFromMimeType(resultMimeType)}`
           };
           
-          console.log('[audioService.js] Audio processing complete:', {
+          logDebug('Audio processing complete', {
             size: result.audioBlob.size,
             type: result.mimeType,
-            filename: result.filename
+            filename: result.filename,
+            sizeKB: Math.round(result.audioBlob.size / 1024)
           });
           
           return result;
         } catch (error) {
-          console.error('[audioService.js] Error creating proper audio file:', error);
+          logDebug('Error in processAudio', { error: error.message });
           throw error;
         }
       };
@@ -293,6 +485,7 @@ export const stopRecording = () => {
       const handleStop = () => {
         processAudio(bufferCopy, chunksCopy, mediaRecorder.mimeType)
           .then(result => {
+            logDebug('Audio processing successful, resolving promise');
             resolve(result);
             
             // Restart recording after a brief delay
@@ -302,12 +495,15 @@ export const stopRecording = () => {
                   setupMediaRecorder(recordingStream);
                 }
               } catch (error) {
-                console.error('[audioService.js] Error restarting media recorder:', error);
+                logDebug('Error restarting media recorder', { error: error.message });
               }
               isResetting = false;
-            }, isIOS ? 200 : 100); // Longer delay for iOS
+            }, isIOS ? 300 : 100); // Longer delay for iOS
           })
           .catch(error => {
+            logDebug('Audio processing failed', { error: error.message });
+            // Download debug logs on error
+            setTimeout(() => downloadDebugLogs(), 1000);
             reject(error);
             isResetting = false;
           });
@@ -315,25 +511,28 @@ export const stopRecording = () => {
       
       // iOS-specific: Add timeout as fallback
       const stopTimeout = setTimeout(() => {
-        console.log('[audioService.js] Stop timeout triggered, processing audio');
+        logDebug('Stop timeout triggered, processing audio anyway');
         handleStop();
       }, isIOS ? 3000 : 2000); // Longer timeout for iOS
       
       mediaRecorder.addEventListener('stop', () => {
         clearTimeout(stopTimeout);
+        logDebug('MediaRecorder stop event received');
         handleStop();
       }, { once: true });
       
       try {
-        console.log('[audioService.js] Stopping MediaRecorder...');
+        logDebug('Stopping MediaRecorder...');
         mediaRecorder.stop();
       } catch (error) {
-        console.error('[audioService.js] Error stopping MediaRecorder:', error);
+        logDebug('Error stopping MediaRecorder', { error: error.message });
         clearTimeout(stopTimeout);
         handleStop();
       }
     } catch (error) {
-      console.error('[audioService.js] Error in stopRecording:', error);
+      logDebug('Error in stopRecording', { error: error.message });
+      // Download debug logs on error
+      setTimeout(() => downloadDebugLogs(), 1000);
       reject(error);
       isResetting = false;
     }
@@ -341,150 +540,65 @@ export const stopRecording = () => {
 };
 
 const createProperAudioFile = async (chunks, allChunks, mimeType) => {
-  console.log('[audioService.js] Creating proper audio file:', { 
+  logDebug('Creating proper audio file', { 
     chunksCount: chunks.length, 
+    allChunksCount: allChunks.length,
     mimeType,
     isIOS 
   });
   
-  // iOS-specific handling for MP4/AAC
-  if (isIOS && mimeType.includes('mp4')) {
-    try {
-      // For iOS MP4, we need to ensure proper container structure
-      const firstChunk = allChunks.length > 0 ? allChunks[0] : null;
-      
-      if (firstChunk) {
-        const properChunks = [firstChunk];
-        
-        for (const chunk of chunks) {
-          if (chunk !== firstChunk) {
-            properChunks.push(chunk);
-          }
-        }
-        
-        console.log('[audioService.js] Using iOS MP4 optimized blob creation');
-        return new Blob(properChunks, { type: mimeType });
-      }
-    } catch (error) {
-      console.error('[audioService.js] Error in iOS MP4 handling:', error);
-    }
-  }
-  
-  // WebM handling for desktop
-  if (mimeType.includes('webm')) {
-    try {
-      const firstChunk = allChunks.length > 0 ? allChunks[0] : null;
-      
-      if (firstChunk) {
-        const properChunks = [firstChunk];
-        
-        for (const chunk of chunks) {
-          if (chunk !== firstChunk) {
-            properChunks.push(chunk);
-          }
-        }
-        
-        return new Blob(properChunks, { type: mimeType });
-      }
-    } catch (error) {
-      console.error('[audioService.js] Error in WebM handling:', error);
-    }
-  }
-  
-  // For iOS, avoid WAV conversion as it can cause memory issues
-  if (!isIOS) {
-    try {
-      const wavBlob = await convertToWav(chunks);
-      if (wavBlob) {
-        console.log('[audioService.js] Successfully converted to WAV');
-        return wavBlob;
-      }
-    } catch (error) {
-      console.error('[audioService.js] Error converting to WAV:', error);
-    }
-  }
-  
-  // Fallback: return as-is
-  console.log('[audioService.js] Using fallback blob creation');
-  return new Blob(chunks, { type: mimeType });
-};
-
-const convertToWav = async (chunks) => {
-  const sampleRate = 16000;
-  const numChannels = 1;
-  const bitsPerSample = 16;
-  
   try {
-    const blob = new Blob(chunks);
-    const arrayBuffer = await blob.arrayBuffer();
-    
-    const tempContext = new (window.AudioContext || window.webkitAudioContext)();
-    
-    let audioBuffer;
-    try {
-      audioBuffer = await tempContext.decodeAudioData(arrayBuffer);
-    } catch (error) {
-      tempContext.close();
-      return null;
+    // For iOS MP4, create a simple blob with proper header
+    if (isIOS && mimeType.includes('mp4')) {
+      logDebug('Using iOS MP4 optimized blob creation');
+      
+      // Take the first chunk as header (contains important metadata)
+      const headerChunk = allChunks.length > 0 ? allChunks[0] : null;
+      
+      if (headerChunk) {
+        // Combine header with the last 10 seconds chunks
+        const finalChunks = [headerChunk, ...chunks.filter(chunk => chunk !== headerChunk)];
+        
+        const blob = new Blob(finalChunks, { type: mimeType });
+        
+        logDebug('iOS MP4 blob created', { 
+          finalChunksCount: finalChunks.length,
+          blobSize: blob.size 
+        });
+        
+        return blob;
+      }
     }
     
-    const numSamples = Math.ceil(audioBuffer.duration * sampleRate);
-    const outputBuffer = new Float32Array(numSamples);
-    
-    const sourceData = audioBuffer.getChannelData(0);
-    const targetLength = outputBuffer.length;
-    const sourceLength = sourceData.length;
-    
-    for (let i = 0; i < targetLength; i++) {
-      const sourceIndex = Math.floor(i * sourceLength / targetLength);
-      outputBuffer[i] = sourceData[sourceIndex];
+    // For WebM (desktop), ensure proper structure
+    if (mimeType.includes('webm')) {
+      logDebug('Using WebM optimized blob creation');
+      
+      const headerChunk = allChunks.length > 0 ? allChunks[0] : null;
+      
+      if (headerChunk) {
+        const finalChunks = [headerChunk, ...chunks.filter(chunk => chunk !== headerChunk)];
+        const blob = new Blob(finalChunks, { type: mimeType });
+        
+        logDebug('WebM blob created', { 
+          finalChunksCount: finalChunks.length,
+          blobSize: blob.size 
+        });
+        
+        return blob;
+      }
     }
     
-    const wavBuffer = createWavHeader(numSamples, sampleRate, numChannels, bitsPerSample);
-    const wavData = new DataView(wavBuffer);
+    // Fallback: return simple blob
+    logDebug('Using fallback blob creation');
+    const blob = new Blob(chunks, { type: mimeType });
     
-    let offset = 44;
-    for (let i = 0; i < numSamples; i++) {
-      const sample = Math.max(-1, Math.min(1, outputBuffer[i]));
-      const pcmValue = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-      wavData.setInt16(offset, pcmValue, true);
-      offset += 2;
-    }
+    logDebug('Fallback blob created', { blobSize: blob.size });
     
-    tempContext.close();
-    
-    return new Blob([wavBuffer], { type: 'audio/wav' });
+    return blob;
   } catch (error) {
-    console.error('[audioService.js] Error in WAV conversion:', error);
-    return null;
-  }
-};
-
-const createWavHeader = (numSamples, sampleRate, numChannels, bitsPerSample) => {
-  const dataSize = numSamples * numChannels * bitsPerSample / 8;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-  
-  writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(view, 8, 'WAVE');
-  writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * bitsPerSample / 8, true);
-  view.setUint16(32, numChannels * bitsPerSample / 8, true);
-  view.setUint16(34, bitsPerSample, true);
-  writeString(view, 36, 'data');
-  view.setUint32(40, dataSize, true);
-  
-  return buffer;
-};
-
-const writeString = (view, offset, string) => {
-  for (let i = 0; i < string.length; i++) {
-    view.setUint8(offset + i, string.charCodeAt(i));
+    logDebug('Error creating proper audio file', { error: error.message });
+    throw error;
   }
 };
 
@@ -506,6 +620,7 @@ const readFileAsArrayBuffer = (file) => {
     };
     
     reader.onerror = (error) => {
+      logDebug('Error reading file as ArrayBuffer', { error: error.toString() });
       reject(error);
     };
     
@@ -513,12 +628,32 @@ const readFileAsArrayBuffer = (file) => {
   });
 };
 
-// Export device detection for debugging
+// Export device detection and debug functions
 export const getDeviceInfo = () => {
   return {
     isIOS,
     safariVersion,
     supportedMimeType,
-    userAgent: navigator.userAgent
+    userAgent: navigator.userAgent,
+    memoryInfo: performance.memory ? {
+      used: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024),
+      total: Math.round(performance.memory.totalJSHeapSize / 1024 / 1024),
+      limit: Math.round(performance.memory.jsHeapSizeLimit / 1024 / 1024)
+    } : null
+  };
+};
+
+export const getDebugInfo = () => {
+  return {
+    bufferState: {
+      bufferSize: lastTenSecondsBuffer.length,
+      maxBufferSize: MAX_BUFFER_SIZE,
+      chunksFor10Seconds: maxChunksFor10Seconds,
+      chunkDuration,
+      isRecordingActive,
+      totalRecordedChunks: recordedChunks.length
+    },
+    deviceInfo: getDeviceInfo(),
+    recentLogs: debugLogs.slice(-10) // Last 10 log entries
   };
 };

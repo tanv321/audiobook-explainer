@@ -1,13 +1,51 @@
 import React, { useState, useEffect } from 'react';
+import { getDebugInfo, downloadDebugLogs, getDeviceInfo } from '../services/audioService';
 
 const AudioDebugger = () => {
   const [debugInfo, setDebugInfo] = useState({});
   const [testResults, setTestResults] = useState({});
   const [isVisible, setIsVisible] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [refreshInterval, setRefreshInterval] = useState(null);
 
   useEffect(() => {
     runDiagnostics();
   }, []);
+
+  useEffect(() => {
+    if (autoRefresh) {
+      const interval = setInterval(() => {
+        updateDebugInfo();
+      }, 2000); // Update every 2 seconds
+      setRefreshInterval(interval);
+    } else {
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+        setRefreshInterval(null);
+      }
+    }
+
+    return () => {
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+      }
+    };
+  }, [autoRefresh]);
+
+  const updateDebugInfo = () => {
+    try {
+      const currentDebugInfo = getDebugInfo();
+      const deviceInfo = getDeviceInfo();
+      
+      setDebugInfo({
+        ...deviceInfo,
+        ...currentDebugInfo,
+        lastUpdate: new Date().toLocaleTimeString()
+      });
+    } catch (error) {
+      console.error('Error updating debug info:', error);
+    }
+  };
 
   const runDiagnostics = async () => {
     const info = {
@@ -16,7 +54,7 @@ const AudioDebugger = () => {
       isIOS: /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream,
       isSafari: /^((?!chrome|android).)*safari/i.test(navigator.userAgent),
       
-      // API Suppor
+      // API Support
       mediaRecorderSupported: !!window.MediaRecorder,
       audioContextSupported: !!(window.AudioContext || window.webkitAudioContext),
       getUserMediaSupported: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
@@ -25,6 +63,13 @@ const AudioDebugger = () => {
       screenWidth: window.screen.width,
       screenHeight: window.screen.height,
       devicePixelRatio: window.devicePixelRatio,
+      
+      // Memory info
+      memoryInfo: performance.memory ? {
+        used: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024),
+        total: Math.round(performance.memory.totalJSHeapSize / 1024 / 1024),
+        limit: Math.round(performance.memory.jsHeapSizeLimit / 1024 / 1024)
+      } : null,
       
       // Browser capabilities
       localStorage: !!window.localStorage,
@@ -61,6 +106,14 @@ const AudioDebugger = () => {
       window.MediaRecorder && MediaRecorder.isTypeSupported(type)
     );
     info.recommendedMimeType = firstSupported || 'none';
+
+    // Get current debug info from audio service
+    try {
+      const audioServiceDebug = getDebugInfo();
+      info.audioServiceDebug = audioServiceDebug;
+    } catch (error) {
+      info.audioServiceError = error.message;
+    }
 
     setDebugInfo(info);
 
@@ -108,6 +161,16 @@ const AudioDebugger = () => {
       });
   };
 
+  const handleDownloadLogs = () => {
+    try {
+      downloadDebugLogs();
+      alert('Debug logs downloaded! Check your Downloads folder.');
+    } catch (error) {
+      console.error('Error downloading logs:', error);
+      alert('Error downloading logs. Check console for details.');
+    }
+  };
+
   if (!isVisible) {
     return (
       <button 
@@ -142,7 +205,7 @@ const AudioDebugger = () => {
       border: '2px solid #ccc',
       borderRadius: '8px',
       padding: '20px',
-      maxWidth: '400px',
+      maxWidth: '450px',
       maxHeight: '80vh',
       overflow: 'auto',
       zIndex: 1000,
@@ -155,7 +218,7 @@ const AudioDebugger = () => {
         alignItems: 'center',
         marginBottom: '15px'
       }}>
-        <h3 style={{ margin: 0 }}>Audio Debug Info</h3>
+        <h3 style={{ margin: 0 }}>Audio Debug Panel</h3>
         <button 
           onClick={() => setIsVisible(false)}
           style={{ 
@@ -168,6 +231,60 @@ const AudioDebugger = () => {
           ✕
         </button>
       </div>
+
+      {/* Auto-refresh toggle */}
+      <div style={{ marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+          <input 
+            type="checkbox" 
+            checked={autoRefresh} 
+            onChange={(e) => setAutoRefresh(e.target.checked)}
+          />
+          Auto-refresh
+        </label>
+        {debugInfo.lastUpdate && (
+          <span style={{ color: '#666', fontSize: '11px' }}>
+            Last update: {debugInfo.lastUpdate}
+          </span>
+        )}
+      </div>
+
+      {/* Memory Usage */}
+      {debugInfo.memoryInfo && (
+        <div style={{ marginBottom: '15px' }}>
+          <h4>Memory Usage</h4>
+          <div style={{ 
+            background: debugInfo.memoryInfo.used > debugInfo.memoryInfo.limit * 0.8 ? '#f8d7da' : '#d4edda',
+            padding: '8px',
+            borderRadius: '4px',
+            fontSize: '11px'
+          }}>
+            <div><strong>Used:</strong> {debugInfo.memoryInfo.used}MB</div>
+            <div><strong>Total:</strong> {debugInfo.memoryInfo.total}MB</div>
+            <div><strong>Limit:</strong> {debugInfo.memoryInfo.limit}MB</div>
+            <div><strong>Usage:</strong> {Math.round(debugInfo.memoryInfo.used / debugInfo.memoryInfo.limit * 100)}%</div>
+          </div>
+        </div>
+      )}
+
+      {/* Audio Service Status */}
+      {debugInfo.audioServiceDebug && (
+        <div style={{ marginBottom: '15px' }}>
+          <h4>Audio Service Status</h4>
+          <div style={{ 
+            background: '#f8f9fa',
+            padding: '8px',
+            borderRadius: '4px',
+            fontSize: '11px'
+          }}>
+            <div><strong>Buffer Size:</strong> {debugInfo.audioServiceDebug.bufferState?.bufferSize || 0}</div>
+            <div><strong>Max Buffer:</strong> {debugInfo.audioServiceDebug.bufferState?.maxBufferSize || 0}</div>
+            <div><strong>Recording Active:</strong> {debugInfo.audioServiceDebug.bufferState?.isRecordingActive ? '✅' : '❌'}</div>
+            <div><strong>Total Chunks:</strong> {debugInfo.audioServiceDebug.bufferState?.totalRecordedChunks || 0}</div>
+            <div><strong>Chunk Duration:</strong> {debugInfo.audioServiceDebug.bufferState?.chunkDuration || 0}ms</div>
+          </div>
+        </div>
+      )}
 
       <div style={{ marginBottom: '15px' }}>
         <h4>Device Info</h4>
@@ -190,7 +307,8 @@ const AudioDebugger = () => {
           background: debugInfo.recommendedMimeType !== 'none' ? '#d4edda' : '#f8d7da',
           padding: '8px',
           borderRadius: '4px',
-          color: debugInfo.recommendedMimeType !== 'none' ? '#155724' : '#721c24'
+          color: debugInfo.recommendedMimeType !== 'none' ? '#155724' : '#721c24',
+          fontSize: '11px'
         }}>
           {debugInfo.recommendedMimeType || 'No supported format found!'}
         </div>
@@ -198,7 +316,7 @@ const AudioDebugger = () => {
 
       <div style={{ marginBottom: '15px' }}>
         <h4>Supported MIME Types</h4>
-        <div style={{ maxHeight: '150px', overflow: 'auto' }}>
+        <div style={{ maxHeight: '100px', overflow: 'auto' }}>
           {Object.entries(debugInfo.supportedMimeTypes || {}).map(([type, supported]) => (
             <div key={type} style={{ 
               fontSize: '10px',
@@ -211,17 +329,43 @@ const AudioDebugger = () => {
         </div>
       </div>
 
+      {/* Recent Logs */}
+      {debugInfo.audioServiceDebug?.recentLogs && (
+        <div style={{ marginBottom: '15px' }}>
+          <h4>Recent Logs</h4>
+          <div style={{ 
+            maxHeight: '120px', 
+            overflow: 'auto', 
+            background: '#f8f9fa',
+            padding: '8px',
+            borderRadius: '4px',
+            fontSize: '10px'
+          }}>
+            {debugInfo.audioServiceDebug.recentLogs.map((log, index) => (
+              <div key={index} style={{ 
+                marginBottom: '4px',
+                borderBottom: '1px solid #eee',
+                paddingBottom: '2px'
+              }}>
+                <strong>{new Date(log.timestamp).toLocaleTimeString()}:</strong> {log.message}
+                {log.data && <div style={{ color: '#666', marginLeft: '10px' }}>{log.data}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {Object.keys(testResults).length > 0 && (
         <div style={{ marginBottom: '15px' }}>
           <h4>Test Results</h4>
           {testResults.mediaRecorderCreated ? (
-            <div style={{ color: 'green' }}>
+            <div style={{ color: 'green', fontSize: '11px' }}>
               ✅ MediaRecorder created successfully<br/>
               <strong>Actual MIME:</strong> {testResults.actualMimeType}<br/>
               <strong>State:</strong> {testResults.state}
             </div>
           ) : (
-            <div style={{ color: 'red' }}>
+            <div style={{ color: 'red', fontSize: '11px' }}>
               ❌ MediaRecorder failed<br/>
               <strong>Error:</strong> {testResults.error}
             </div>
@@ -231,8 +375,9 @@ const AudioDebugger = () => {
 
       <div style={{ 
         display: 'flex', 
-        gap: '10px',
-        flexWrap: 'wrap'
+        gap: '8px',
+        flexWrap: 'wrap',
+        marginBottom: '10px'
       }}>
         <button 
           onClick={runDiagnostics}
@@ -240,13 +385,27 @@ const AudioDebugger = () => {
             background: '#28a745',
             color: 'white',
             border: 'none',
-            padding: '8px 12px',
+            padding: '6px 10px',
             borderRadius: '4px',
             cursor: 'pointer',
-            fontSize: '12px'
+            fontSize: '11px'
           }}
         >
           Re-test
+        </button>
+        <button 
+          onClick={updateDebugInfo}
+          style={{
+            background: '#17a2b8',
+            color: 'white',
+            border: 'none',
+            padding: '6px 10px',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '11px'
+          }}
+        >
+          Refresh Status
         </button>
         <button 
           onClick={copyToClipboard}
@@ -254,18 +413,45 @@ const AudioDebugger = () => {
             background: '#007bff',
             color: 'white',
             border: 'none',
-            padding: '8px 12px',
+            padding: '6px 10px',
             borderRadius: '4px',
             cursor: 'pointer',
-            fontSize: '12px'
+            fontSize: '11px'
           }}
         >
           Copy Debug Info
         </button>
+        <button 
+          onClick={handleDownloadLogs}
+          style={{
+            background: '#dc3545',
+            color: 'white',
+            border: 'none',
+            padding: '6px 10px',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '11px',
+            fontWeight: 'bold'
+          }}
+        >
+          📥 Download Full Logs
+        </button>
       </div>
 
+      {debugInfo.audioServiceError && (
+        <div style={{ 
+          background: '#f8d7da',
+          color: '#721c24',
+          padding: '8px',
+          borderRadius: '4px',
+          fontSize: '11px',
+          marginBottom: '10px'
+        }}>
+          <strong>Audio Service Error:</strong> {debugInfo.audioServiceError}
+        </div>
+      )}
+
       <div style={{ 
-        marginTop: '15px', 
         fontSize: '10px', 
         color: '#666',
         borderTop: '1px solid #eee',
