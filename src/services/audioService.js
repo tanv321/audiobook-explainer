@@ -608,7 +608,7 @@ const getFileExtensionFromMimeType = (mimeType) => {
   if (mimeType.includes('ogg')) return 'ogg';
   if (mimeType.includes('mp3') || mimeType.includes('mpeg')) return 'mp3';
   if (mimeType.includes('wav')) return 'wav';
-  return isIOS ? 'mp4' : 'webm'; // Default based on platform
+  return isIOS ? 'mp4' : 'webm'; // Default based on platfor
 };
 
 const readFileAsArrayBuffer = (file) => {
