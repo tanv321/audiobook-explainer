@@ -16,7 +16,7 @@ const AudioDebugger = () => {
       isIOS: /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream,
       isSafari: /^((?!chrome|android).)*safari/i.test(navigator.userAgent),
       
-      // API Support
+      // API Suppor
       mediaRecorderSupported: !!window.MediaRecorder,
       audioContextSupported: !!(window.AudioContext || window.webkitAudioContext),
       getUserMediaSupported: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
